@@ -8,20 +8,16 @@
 // ==========================================
 //              USER CONFIGURATION
 // ==========================================
-const char* ssid = "YOUR_WIFI_SSID";          // <--- EDIT THIS
+const char* ssid = "YOUR_SSID";          // <--- EDIT THIS
 const char* password = "YOUR_WIFI_PASSWORD";  // <--- EDIT THIS
-
-// MQTT Broker Settings (Home Assistant)
-const char* mqtt_server = "192.168.1.XXX";    // <--- EDIT THIS (IP of Home Assistant)
+const char* mqtt_server = "192.168.1.xxx";    // <--- EDIT THIS
 const int mqtt_port = 1883;
-const char* mqtt_user = "mqtt_user";          // <--- EDIT THIS (if required)
-const char* mqtt_pass = "mqtt_password";      // <--- EDIT THIS (if required)
-
-// The topic where data will be published
-const char* mqtt_topic = "lora/garage/sensors";
+const char* mqtt_user = "mqtt_user";          // <--- EDIT THIS (or leave blank)
+const char* mqtt_pass = "mqtt_password";      // <--- EDIT THIS (or leave blank)
+const char* mqtt_topic = "lora/sensors";
 
 // ==========================================
-//           HARDWARE PINS (TTGO V1.6)
+//           HARDWARE PINS
 // ==========================================
 #define SCK_PIN  5
 #define MISO_PIN 19
@@ -29,145 +25,124 @@ const char* mqtt_topic = "lora/garage/sensors";
 #define SS_PIN   18
 #define RST_PIN  23 
 #define DI0_PIN  26
-#define BAND 868E6 // 868E6 for Europe, 915E6 for North America
+#define BAND 868E6 
 
-// ==========================================
-//             GLOBAL OBJECTS
-// ==========================================
+// Objects
 SSD1306 display(0x3C, 21, 22);
 WiFiClient espClient;
 PubSubClient client(espClient);
 
-// ==========================================
-//             HELPER FUNCTIONS
-// ==========================================
-
-// Connect to WiFi
 void setup_wifi() {
   delay(10);
   Serial.println();
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
-  
-  display.clear();
-  display.drawString(0, 0, "Connecting to WiFi...");
-  display.drawString(0, 15, ssid);
-  display.display();
-
+  Serial.print("Connecting WiFi");
   WiFi.begin(ssid, password);
 
+  int retries = 0;
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
+    retries++;
+    if (retries > 30) { 
+      Serial.println("\nWiFi Failed! Continuing in Offline Mode...");
+      return; 
+    }
   }
-
-  Serial.println("");
-  Serial.println("WiFi connected");
-  Serial.println("IP address: ");
+  Serial.println("\nWiFi Connected!");
+  Serial.print("IP: ");
   Serial.println(WiFi.localIP());
-  
-  display.clear();
-  display.drawString(0, 0, "WiFi Connected!");
-  display.drawString(0, 15, WiFi.localIP().toString());
-  display.display();
 }
 
-// Connect to MQTT
 void reconnect() {
   // Loop until we're reconnected
   while (!client.connected()) {
     Serial.print("Attempting MQTT connection...");
-    
-    // Create a random client ID so the broker doesn't reject us
-    String clientId = "LoRaGateway-";
-    clientId += String(random(0xffff), HEX);
-    
-    // Attempt to connect
+    String clientId = "LoRaGateway-" + String(random(0xffff), HEX);
     if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass)) {
       Serial.println("connected");
-      display.drawString(0, 30, "MQTT Connected");
-      display.display();
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
-      Serial.println(" try again in 5 seconds");
-      display.drawString(0, 30, "MQTT Fail! Retrying...");
-      display.display();
+      Serial.println(" try again in 5s");
       delay(5000);
     }
   }
 }
 
-// ==========================================
-//                 SETUP
-// ==========================================
 void setup() {
   Serial.begin(115200);
+  delay(1000);
+  Serial.println("\n\n=== BOOTING GATEWAY v3.0 ===");
 
-  // 1. Init OLED
-  pinMode(16, OUTPUT); // OLED Reset if needed
-  digitalWrite(16, LOW);
-  delay(50);
-  digitalWrite(16, HIGH);
-  
-  display.init();
-  display.flipScreenVertically();
-  display.setFont(ArialMT_Plain_10);
-
-  // 2. Init LoRa
-  Serial.println("LoRa Receiver Init");
+  // 1. Init LoRa (Moved FIRST to ensure radio works)
+  Serial.print("Step 1: Init LoRa...");
   SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, SS_PIN);
   LoRa.setPins(SS_PIN, RST_PIN, DI0_PIN);
   
   if (!LoRa.begin(BAND)) {
-    Serial.println("Starting LoRa failed!");
-    display.drawString(0, 50, "LoRa Init Failed!");
-    display.display();
-    while (1);
+    Serial.println(" FAILED!");
+    // If LoRa fails, we loop here safely
+    while (1) {
+      Serial.println("LoRa Init Failed - Check Pins!");
+      delay(2000);
+    }
   }
-  Serial.println("LoRa Init OK");
+  Serial.println(" OK!");
 
-  // 3. Init Network
+  // 2. Init Network
+  Serial.print("Step 2: Init WiFi...");
   setup_wifi();
   client.setServer(mqtt_server, mqtt_port);
+
+  // 3. Init OLED (Moved LAST and simplified)
+  // We removed the Pin 16 toggle causing the crash
+  Serial.print("Step 3: Init OLED...");
+  display.init();
+  display.flipScreenVertically();
+  display.setFont(ArialMT_Plain_10);
+  display.clear();
+  display.drawString(0, 0, "Gateway Running");
+  display.drawString(0, 15, "WiFi: " + WiFi.localIP().toString());
+  display.drawString(0, 30, "Waiting for Data...");
+  display.display();
+  Serial.println(" OK!");
+  
+  Serial.println("=== SYSTEM READY ===");
 }
 
-// ==========================================
-//                 LOOP
-// ==========================================
 void loop() {
-  // 1. Ensure WiFi/MQTT is alive
-  if (!client.connected()) {
-    reconnect();
+  // 1. Keep WiFi/MQTT Alive
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!client.connected()) {
+      reconnect();
+    }
+    client.loop();
   }
-  client.loop();
 
-  // 2. Check for LoRa packets
+  // 2. Listen for LoRa
   int packetSize = LoRa.parsePacket();
   if (packetSize) {
-    // Received a packet
     String incoming = "";
-
-    // Read packet
     while (LoRa.available()) {
       incoming += (char)LoRa.read();
     }
-
-    Serial.print("Received packet: ");
+    
+    // Debug to Serial
+    Serial.print("RX Packet: ");
     Serial.println(incoming);
     Serial.print("RSSI: ");
     Serial.println(LoRa.packetRssi());
 
-    // 3. Forward to Home Assistant via MQTT
-    // We send the exact JSON string received from the sensor
-    client.publish(mqtt_topic, incoming.c_str());
+    // Send to Home Assistant
+    if (client.connected()) {
+      client.publish(mqtt_topic, incoming.c_str());
+    }
 
-    // 4. Update Display
+    // Update Screen
     display.clear();
-    display.drawString(0, 0, "Packet Received!");
+    display.drawString(0, 0, "RX Data:");
     display.drawString(0, 15, incoming);
-    display.drawString(0, 30, "RSSI: " + String(LoRa.packetRssi()));
-    display.drawString(0, 45, "IP: " + WiFi.localIP().toString());
+    display.drawString(0, 35, "RSSI: " + String(LoRa.packetRssi()));
     display.display();
   }
 }
