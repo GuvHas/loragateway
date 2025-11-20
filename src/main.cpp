@@ -25,8 +25,8 @@ char mqtt_server[40] = "";
 char mqtt_port[6] = "1883";
 char mqtt_user[40] = "";
 char mqtt_pass[40] = "";
-// Default topic is now GENERIC to allow multiple sensors
-char mqtt_topic[40] = "lora/incoming"; 
+char mqtt_topic[40] = "lora/incoming";
+char device_name[40] = "LoRaGateway"; // Default Friendly Name
 
 bool shouldSaveConfig = false;
 
@@ -38,9 +38,19 @@ WiFiClient espClient;
 PubSubClient client(espClient);
 Preferences preferences; 
 
-// Callback notifying us the need to save config
+// ** Global WiFiManager & Parameters **
+WiFiManager wm;
+// Custom fields for the portal
+WiFiManagerParameter custom_device_name("devname", "Device Name", "LoRaGateway", 40);
+WiFiManagerParameter custom_mqtt_server("server", "MQTT Server IP", "", 40);
+WiFiManagerParameter custom_mqtt_port("port", "MQTT Port", "1883", 6);
+WiFiManagerParameter custom_mqtt_user("user", "MQTT User", "", 40);
+WiFiManagerParameter custom_mqtt_pass("pass", "MQTT Password", "", 40);
+WiFiManagerParameter custom_mqtt_topic("topic", "MQTT Topic", "lora/incoming", 40);
+
+// Callback: Detects when user hits "Save"
 void saveConfigCallback () {
-  Serial.println("Should save config");
+  Serial.println("Settings changed via Web Portal!");
   shouldSaveConfig = true;
 }
 
@@ -54,51 +64,42 @@ void setup_display() {
   display.setFont(ArialMT_Plain_10);
 }
 
-// Helper to draw the footer with IP and Signal strength
 void drawFooter() {
-  display.drawLine(0, 52, 128, 52); // Separator line
+  display.drawLine(0, 52, 128, 52); 
   display.setFont(ArialMT_Plain_10);
   
   // Show IP
   display.drawString(0, 54, WiFi.localIP().toString());
   
-  // Show Signal Bars (Simple visual)
+  // Show Signal
   long rssi = WiFi.RSSI();
-  int bars = 0;
-  if (rssi > -55) bars = 4;
-  else if (rssi > -65) bars = 3;
-  else if (rssi > -75) bars = 2;
-  else bars = 1;
+  int bars = (rssi > -55) ? 4 : (rssi > -65) ? 3 : (rssi > -75) ? 2 : 1;
+  if (rssi == 0) bars = 0; 
   
-  String signalStr = "WiFi: " + String(bars) + "/4";
-  // Right align the signal strength
+  String signalStr = String(bars) + "/4";
   int strWidth = display.getStringWidth(signalStr);
   display.drawString(128 - strWidth, 54, signalStr);
 }
 
 void reconnect() {
-  while (!client.connected()) {
+  static unsigned long lastReconnectAttempt = 0;
+  unsigned long now = millis();
+  
+  if (now - lastReconnectAttempt > 5000) {
+    lastReconnectAttempt = now;
     Serial.print("Connecting to MQTT...");
     
-    String clientId = "LoRaGW-" + String(random(0xffff), HEX);
     int port = atoi(mqtt_port);
     client.setServer(mqtt_server, port);
-
+    
+    String clientId = String(device_name) + "-" + String(random(0xffff), HEX);
+    
     if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass)) {
       Serial.println("connected");
-      // Once connected, we stay silent on screen until data arrives
     } else {
       Serial.print("failed, rc=");
       Serial.print(client.state());
-      Serial.println(" try again in 5s");
-      
-      // Show error on screen
-      display.clear();
-      display.drawString(0, 0, "MQTT Error!");
-      display.drawString(0, 15, "State: " + String(client.state()));
-      drawFooter();
-      display.display();
-      delay(5000);
+      Serial.println(" try again later");
     }
   }
 }
@@ -114,21 +115,32 @@ void setup() {
   display.drawString(0, 0, "Booting System...");
   display.display();
 
-  // 1. LOAD SETTINGS
+  // 1. LOAD SETTINGS FROM MEMORY
   preferences.begin("loraconf", false);
-  String s_server = preferences.getString("server", "");
-  String s_port = preferences.getString("port", "1883");
-  String s_user = preferences.getString("user", "");
-  String s_pass = preferences.getString("pass", "");
-  String s_topic = preferences.getString("topic", "lora/incoming"); // Generic Default
+  
+  if(preferences.getString("server", "").length() > 0){
+     preferences.getString("server").toCharArray(mqtt_server, 40);
+     preferences.getString("port").toCharArray(mqtt_port, 6);
+     preferences.getString("user").toCharArray(mqtt_user, 40);
+     preferences.getString("pass").toCharArray(mqtt_pass, 40);
+     preferences.getString("topic").toCharArray(mqtt_topic, 40);
+  }
+  if(preferences.getString("devname", "").length() > 0){
+     preferences.getString("devname").toCharArray(device_name, 40);
+  }
+  
+  // 2. APPLY HOSTNAME (Must be done before WiFi connects)
+  WiFi.setHostname(device_name);
 
-  s_server.toCharArray(mqtt_server, 40);
-  s_port.toCharArray(mqtt_port, 6);
-  s_user.toCharArray(mqtt_user, 40);
-  s_pass.toCharArray(mqtt_pass, 40);
-  s_topic.toCharArray(mqtt_topic, 40);
+  // 3. INJECT VALUES INTO WEB PORTAL
+  custom_mqtt_server.setValue(mqtt_server, 40);
+  custom_mqtt_port.setValue(mqtt_port, 6);
+  custom_mqtt_user.setValue(mqtt_user, 40);
+  custom_mqtt_pass.setValue(mqtt_pass, 40);
+  custom_mqtt_topic.setValue(mqtt_topic, 40);
+  custom_device_name.setValue(device_name, 40);
 
-  // 2. START LORA
+  // 4. START LORA
   SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, SS_PIN);
   LoRa.setPins(SS_PIN, RST_PIN, DI0_PIN);
   if (!LoRa.begin(BAND)) {
@@ -138,64 +150,40 @@ void setup() {
     while (1) delay(1000);
   }
 
-  // 3. WIFI MANAGER
-  WiFiManager wm;
+  // 5. CONFIGURE WIFI MANAGER
+  wm.setConfigPortalBlocking(false);
   wm.setSaveConfigCallback(saveConfigCallback);
 
-  // Custom Parameters
-  WiFiManagerParameter custom_mqtt_server("server", "MQTT Server IP", mqtt_server, 40);
-  WiFiManagerParameter custom_mqtt_port("port", "MQTT Port", mqtt_port, 6);
-  WiFiManagerParameter custom_mqtt_user("user", "MQTT User", mqtt_user, 40);
-  WiFiManagerParameter custom_mqtt_pass("pass", "MQTT Password", mqtt_pass, 40);
-  WiFiManagerParameter custom_mqtt_topic("topic", "MQTT Topic", mqtt_topic, 40);
-
+  // Add parameters (Order matters for display)
+  wm.addParameter(&custom_device_name); // <--- Added here
   wm.addParameter(&custom_mqtt_server);
   wm.addParameter(&custom_mqtt_port);
   wm.addParameter(&custom_mqtt_user);
   wm.addParameter(&custom_mqtt_pass);
   wm.addParameter(&custom_mqtt_topic);
 
-  // Info Screen
+  // Info on screen
   display.clear();
-  display.drawString(0, 0, "Setup Mode");
-  display.drawString(0, 15, "Connect to WiFi:");
-  display.drawString(0, 25, "AP: LoRaGateway-Setup");
+  display.drawString(0, 0, "Connecting WiFi...");
+  display.drawString(0, 15, "AP: LoRaGateway-Setup");
   display.display();
 
-  wm.setConfigPortalTimeout(180); 
+  if(wm.autoConnect("LoRaGateway-Setup")) {
+      Serial.println("WiFi Connected!");
+  } else {
+      Serial.println("WiFi Portal Active");
+  }
   
-  if (!wm.autoConnect("LoRaGateway-Setup")) {
-    Serial.println("timeout, restarting");
-    delay(3000);
-    ESP.restart(); 
-  }
+  wm.startWebPortal();
 
-  // 4. SAVE CONFIG
-  if (shouldSaveConfig) {
-    strcpy(mqtt_server, custom_mqtt_server.getValue());
-    strcpy(mqtt_port, custom_mqtt_port.getValue());
-    strcpy(mqtt_user, custom_mqtt_user.getValue());
-    strcpy(mqtt_pass, custom_mqtt_pass.getValue());
-    strcpy(mqtt_topic, custom_mqtt_topic.getValue());
-
-    preferences.putString("server", mqtt_server);
-    preferences.putString("port", mqtt_port);
-    preferences.putString("user", mqtt_user);
-    preferences.putString("pass", mqtt_pass);
-    preferences.putString("topic", mqtt_topic);
-  }
-  preferences.end();
-
-  // 5. READY STATE
+  // 6. READY STATE
   client.setServer(mqtt_server, atoi(mqtt_port));
-
+  
   display.clear();
   display.setFont(ArialMT_Plain_16);
   display.drawString(0, 0, "Gateway Ready");
   display.setFont(ArialMT_Plain_10);
-  display.drawString(0, 20, "Listening on 868MHz");
-  display.drawString(0, 30, "Dest: " + String(mqtt_topic));
-  drawFooter();
+  display.drawString(0, 20, "Name: " + String(device_name));
   display.display();
 }
 
@@ -203,21 +191,63 @@ void setup() {
 //                 LOOP
 // ==========================================
 void loop() {
-  // 1. Network Maintenance
-  if (!client.connected()) {
-    reconnect();
-    // Redraw "Ready" screen after reconnecting
-    display.clear();
-    display.setFont(ArialMT_Plain_16);
-    display.drawString(0, 0, "Gateway Ready");
-    display.setFont(ArialMT_Plain_10);
-    display.drawString(0, 20, "Listening...");
-    drawFooter();
-    display.display();
-  }
-  client.loop();
+  wm.process();
 
-  // 2. LoRa Handling
+  // HANDLE SETTINGS CHANGE
+  if (shouldSaveConfig) {
+    shouldSaveConfig = false;
+    
+    // Check if name changed to trigger a WiFi refresh
+    String new_name = String(custom_device_name.getValue());
+    bool nameChanged = (new_name != String(device_name));
+
+    strcpy(mqtt_server, custom_mqtt_server.getValue());
+    strcpy(mqtt_port, custom_mqtt_port.getValue());
+    strcpy(mqtt_user, custom_mqtt_user.getValue());
+    strcpy(mqtt_pass, custom_mqtt_pass.getValue());
+    strcpy(mqtt_topic, custom_mqtt_topic.getValue());
+    strcpy(device_name, custom_device_name.getValue());
+
+    Serial.println("Saving config...");
+    preferences.putString("server", mqtt_server);
+    preferences.putString("port", mqtt_port);
+    preferences.putString("user", mqtt_user);
+    preferences.putString("pass", mqtt_pass);
+    preferences.putString("topic", mqtt_topic);
+    preferences.putString("devname", device_name);
+    
+    // Disconnect MQTT to force reconnect with new settings
+    client.disconnect(); 
+
+    // If name changed, restart WiFi to apply new Hostname
+    if (nameChanged) {
+      Serial.println("Name changed, restarting WiFi...");
+      WiFi.setHostname(device_name);
+      // A brief disconnect/reconnect cycle
+      WiFi.disconnect(); 
+      WiFi.reconnect();
+    }
+  }
+
+  // MANAGE WIFI & MQTT
+  if (WiFi.status() == WL_CONNECTED) {
+      if (!client.connected()) {
+        reconnect();
+        
+        // Update Screen
+        display.clear();
+        display.setFont(ArialMT_Plain_16);
+        display.drawString(0, 0, "Gateway Ready");
+        display.setFont(ArialMT_Plain_10);
+        display.drawString(0, 20, "Web IP:");
+        display.drawString(0, 30, WiFi.localIP().toString());
+        drawFooter();
+        display.display();
+      }
+      client.loop();
+  }
+
+  // LISTEN FOR LORA
   int packetSize = LoRa.parsePacket();
   if (packetSize) {
     String incoming = "";
@@ -228,21 +258,15 @@ void loop() {
     Serial.print("RX: ");
     Serial.println(incoming);
 
-    // Send to MQTT
     client.publish(mqtt_topic, incoming.c_str());
 
-    // Update Display with Data
     display.clear();
     display.setFont(ArialMT_Plain_10);
     display.drawString(0, 0, "Packet Forwarded!");
-    
-    // Display the raw JSON so you can see which sensor sent it
-    // Wrap text is automatic in some libs, but we truncate to fit
     display.drawStringMaxWidth(0, 15, 128, incoming);
-    
     display.drawString(0, 35, "RSSI: " + String(LoRa.packetRssi()) + "dBm");
     
-    drawFooter(); // Always draw the footer with IP
+    drawFooter();
     display.display();
   }
 }
