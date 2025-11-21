@@ -6,6 +6,7 @@
 #include "SSD1306.h"
 #include <WiFiManager.h> 
 #include <Preferences.h> 
+#include <ArduinoJson.h> // <--- Include JSON Library
 
 // ==========================================
 //           HARDWARE PINS (TTGO V1.6)
@@ -25,7 +26,7 @@ char mqtt_server[40] = "";
 char mqtt_port[6] = "1883";
 char mqtt_user[40] = "";
 char mqtt_pass[40] = "";
-char mqtt_topic[40] = "lora/incoming";
+char mqtt_topic[40] = "lora/incoming"; // This is now the BASE topic
 char device_name[40] = "LoRaGateway";
 
 bool shouldSaveConfig = false;
@@ -34,7 +35,7 @@ bool shouldSaveConfig = false;
 //           SCREEN MANAGEMENT
 // ==========================================
 unsigned long lastScreenUpdate = 0;
-unsigned long screenTimeout = 30000; // Initial boot timeout (30s)
+unsigned long screenTimeout = 30000; 
 bool isScreenOn = true;
 
 // ==========================================
@@ -51,7 +52,7 @@ WiFiManagerParameter custom_mqtt_server("server", "MQTT Server IP", "", 40);
 WiFiManagerParameter custom_mqtt_port("port", "MQTT Port", "1883", 6);
 WiFiManagerParameter custom_mqtt_user("user", "MQTT User", "", 40);
 WiFiManagerParameter custom_mqtt_pass("pass", "MQTT Password", "", 40);
-WiFiManagerParameter custom_mqtt_topic("topic", "MQTT Topic", "lora/incoming", 40);
+WiFiManagerParameter custom_mqtt_topic("topic", "MQTT Base Topic", "lora/incoming", 40);
 
 void saveConfigCallback () {
   Serial.println("Settings changed via Web Portal!");
@@ -68,7 +69,6 @@ void setup_display() {
   display.setFont(ArialMT_Plain_10);
 }
 
-// Helper to wake screen
 void wakeDisplay(int duration_ms) {
   display.displayOn();
   isScreenOn = true;
@@ -98,7 +98,6 @@ void reconnect() {
     lastReconnectAttempt = now;
     Serial.print("Connecting to MQTT...");
     
-    // Wake screen to show status if we lost connection
     if (!isScreenOn) wakeDisplay(5000);
     display.clear();
     display.drawString(0, 0, "MQTT Reconnecting...");
@@ -110,7 +109,6 @@ void reconnect() {
     
     if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass)) {
       Serial.println("connected");
-      // Show success briefly
       display.clear();
       display.drawString(0, 0, "MQTT Connected!");
       display.display();
@@ -132,8 +130,6 @@ void setup() {
   setup_display();
   display.drawString(0, 0, "Booting System...");
   display.display();
-  
-  // Keep screen on for 30s during boot so user can see IP
   wakeDisplay(30000); 
 
   preferences.begin("loraconf", false);
@@ -204,17 +200,14 @@ void setup() {
 void loop() {
   wm.process();
 
-  // 1. Screen Power Management
   if (isScreenOn && (millis() - lastScreenUpdate > screenTimeout)) {
     display.displayOff();
     isScreenOn = false;
-    Serial.println("Screen Timeout -> OFF");
   }
 
-  // 2. Save Config
   if (shouldSaveConfig) {
     shouldSaveConfig = false;
-    wakeDisplay(10000); // Keep screen on while saving
+    wakeDisplay(10000);
     display.clear();
     display.drawString(0,0, "Saving Settings...");
     display.display();
@@ -245,7 +238,6 @@ void loop() {
     }
   }
 
-  // 3. Network & MQTT
   if (WiFi.status() == WL_CONNECTED) {
       if (!client.connected()) {
         reconnect();
@@ -253,7 +245,6 @@ void loop() {
       client.loop();
   }
 
-  // 4. LoRa Handling
   int packetSize = LoRa.parsePacket();
   if (packetSize) {
     String incoming = "";
@@ -264,15 +255,32 @@ void loop() {
     Serial.print("RX: ");
     Serial.println(incoming);
 
-    // Forward to MQTT
-    client.publish(mqtt_topic, incoming.c_str());
-
-    // === WAKE SCREEN ON RECEIVE ===
-    wakeDisplay(5000); // Turn on for 5 seconds
+    // === NEW LOGIC START ===
+    // 1. Parse JSON to find the ID
+    StaticJsonDocument<256> doc;
+    DeserializationError error = deserializeJson(doc, incoming);
     
+    String finalTopic = mqtt_topic; // Start with default "lora/incoming"
+    
+    if (!error && doc.containsKey("id")) {
+        // 2. Extract ID and make it lowercase (e.g., "GarageTemp" -> "garagetemp")
+        String id = doc["id"].as<String>();
+        id.toLowerCase();
+        
+        // 3. Append to base topic -> "lora/incoming/garagetemp"
+        finalTopic = String(mqtt_topic) + "/" + id;
+    } else {
+        Serial.println("JSON Parse Error or ID missing, using base topic");
+    }
+
+    // 4. Publish to the dynamic subtopic
+    client.publish(finalTopic.c_str(), incoming.c_str());
+    // === NEW LOGIC END ===
+
+    wakeDisplay(5000);
     display.clear();
     display.setFont(ArialMT_Plain_10);
-    display.drawString(0, 0, "Packet Forwarded!");
+    display.drawString(0, 0, "Fwd: " + finalTopic); // Show the topic we used
     display.drawStringMaxWidth(0, 15, 128, incoming);
     display.drawString(0, 35, "RSSI: " + String(LoRa.packetRssi()) + "dBm");
     drawFooter();
