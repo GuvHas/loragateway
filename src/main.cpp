@@ -7,6 +7,7 @@
 #include <WiFiManager.h> 
 #include <Preferences.h> 
 #include <ArduinoJson.h> 
+#include <vector> 
 
 // ==========================================
 //           HARDWARE PINS (TTGO V1.6)
@@ -22,7 +23,6 @@
 // ==========================================
 //              LOGO BITMAP
 // ==========================================
-// 'logo1-modified', 112x64px
 const unsigned char my_bitmap_logo1_modified [] PROGMEM = {
   0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
   0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
@@ -62,7 +62,6 @@ const unsigned char my_bitmap_logo1_modified [] PROGMEM = {
   0x10,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
   0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
   0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
-  0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
   0x00,0x00,0x00,0x00,0xfe,0x3f,0xfc,0x7f,0xfc,0xff,0x01,0x00,0x00,0x00,0x00,
   0x00,0x00,0x00,0xab,0x2a,0x56,0xd5,0x54,0xd7,0x00,0x00,0x00,0x00,0x00,0x00,
   0x00,0x80,0x01,0x60,0x02,0x80,0x00,0x02,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
@@ -97,13 +96,12 @@ char mqtt_topic[40] = "lora/incoming";
 char device_name[40] = "LoRaGateway";
 
 bool shouldSaveConfig = false;
-
-// ==========================================
-//           SCREEN MANAGEMENT
-// ==========================================
 unsigned long lastScreenUpdate = 0;
 unsigned long screenTimeout = 30000; 
 bool isScreenOn = true;
+
+// List to track sensors we have already auto-discovered this session
+std::vector<String> discovered_nodes; 
 
 // ==========================================
 //             GLOBAL OBJECTS
@@ -112,8 +110,9 @@ SSD1306 display(0x3C, 21, 22);
 WiFiClient espClient;
 PubSubClient client(espClient);
 Preferences preferences; 
-
 WiFiManager wm;
+
+// WiFiManager Parameters
 WiFiManagerParameter custom_device_name("devname", "Device Name", "LoRaGateway", 40);
 WiFiManagerParameter custom_mqtt_server("server", "MQTT Server IP", "", 40);
 WiFiManagerParameter custom_mqtt_port("port", "MQTT Port", "1883", 6);
@@ -130,13 +129,12 @@ void saveConfigCallback () {
 //           HELPER FUNCTIONS
 // ==========================================
 
-// Show logo on display (5s delay inside)
 void present_logo() {
   display.clear();
   display.displayOn();
   display.drawXbm(0,0,112,64,my_bitmap_logo1_modified);
   display.display();
-  delay(5000); // 5 seconds pause
+  delay(5000); 
 }
 
 void setup_display() {
@@ -156,11 +154,9 @@ void drawFooter() {
   display.drawLine(0, 52, 128, 52); 
   display.setFont(ArialMT_Plain_10);
   display.drawString(0, 54, WiFi.localIP().toString());
-  
   long rssi = WiFi.RSSI();
   int bars = (rssi > -55) ? 4 : (rssi > -65) ? 3 : (rssi > -75) ? 2 : 1;
   if (rssi == 0) bars = 0; 
-  
   String signalStr = String(bars) + "/4";
   int strWidth = display.getStringWidth(signalStr);
   display.drawString(128 - strWidth, 54, signalStr);
@@ -173,7 +169,6 @@ void reconnect() {
   if (now - lastReconnectAttempt > 5000) {
     lastReconnectAttempt = now;
     Serial.print("Connecting to MQTT...");
-    
     if (!isScreenOn) wakeDisplay(5000);
     display.clear();
     display.drawString(0, 0, "MQTT Reconnecting...");
@@ -196,17 +191,96 @@ void reconnect() {
   }
 }
 
+// --- AUTO DISCOVERY FUNCTION ---
+void sendAutoDiscovery(String node_id) {
+  Serial.println("Sending Auto Discovery for: " + node_id);
+  
+  // The device needs a sanitized ID for topic names (lowercase, no spaces)
+  String safe_id = node_id;
+  safe_id.toLowerCase();
+  
+  // Base topic for this device's data
+  String state_topic = String(mqtt_topic) + "/" + safe_id;
+
+  // --- 1. TEMPERATURE ---
+  String topic_t = "homeassistant/sensor/lora_" + safe_id + "_t/config";
+  StaticJsonDocument<600> doc_t;
+  doc_t["name"] = node_id + " Temperature";
+  doc_t["stat_t"] = state_topic;
+  doc_t["val_tpl"] = "{{ value_json.t }}";
+  doc_t["unit_of_meas"] = "°C";
+  doc_t["dev_cla"] = "temperature";
+  doc_t["uniq_id"] = "lora_" + safe_id + "_t";
+  // Device Info (groups them together)
+  JsonObject dev = doc_t.createNestedObject("dev");
+  dev["ids"] = "lora_" + safe_id;
+  dev["name"] = node_id;
+  dev["mdl"] = "LoRa Sensor Node";
+  dev["mf"] = "DIY";
+  
+  String buffer_t;
+  serializeJson(doc_t, buffer_t);
+  client.publish(topic_t.c_str(), buffer_t.c_str(), true);
+
+  // --- 2. HUMIDITY ---
+  String topic_h = "homeassistant/sensor/lora_" + safe_id + "_h/config";
+  StaticJsonDocument<600> doc_h;
+  doc_h["name"] = node_id + " Humidity";
+  doc_h["stat_t"] = state_topic;
+  doc_h["val_tpl"] = "{{ value_json.h }}";
+  doc_h["unit_of_meas"] = "%";
+  doc_h["dev_cla"] = "humidity";
+  doc_h["uniq_id"] = "lora_" + safe_id + "_h";
+  doc_h["dev"] = dev; // Attach same device info
+  
+  String buffer_h;
+  serializeJson(doc_h, buffer_h);
+  client.publish(topic_h.c_str(), buffer_h.c_str(), true);
+
+  // --- 3. BATTERY ---
+  String topic_v = "homeassistant/sensor/lora_" + safe_id + "_v/config";
+  StaticJsonDocument<600> doc_v;
+  doc_v["name"] = node_id + " Battery";
+  doc_v["stat_t"] = state_topic;
+  doc_v["val_tpl"] = "{{ value_json.v }}";
+  doc_v["unit_of_meas"] = "V";
+  doc_v["dev_cla"] = "voltage";
+  doc_v["uniq_id"] = "lora_" + safe_id + "_v";
+  
+  // ** NEW: Force 2 Decimal Places in UI **
+  doc_v["sugg_dsp_prec"] = 2; 
+  
+  doc_v["dev"] = dev; 
+  
+  String buffer_v;
+  serializeJson(doc_v, buffer_v);
+  client.publish(topic_v.c_str(), buffer_v.c_str(), true);
+
+  // --- 4. RSSI ---
+  String topic_r = "homeassistant/sensor/lora_" + safe_id + "_r/config";
+  StaticJsonDocument<600> doc_r;
+  doc_r["name"] = node_id + " Signal";
+  doc_r["stat_t"] = state_topic;
+  doc_r["val_tpl"] = "{{ value_json.rssi }}";
+  doc_r["unit_of_meas"] = "dBm";
+  doc_r["dev_cla"] = "signal_strength";
+  doc_r["uniq_id"] = "lora_" + safe_id + "_r";
+  doc_r["dev"] = dev; 
+  
+  String buffer_r;
+  serializeJson(doc_r, buffer_r);
+  client.publish(topic_r.c_str(), buffer_r.c_str(), true);
+}
+
 // ==========================================
 //                 SETUP
 // ==========================================
 void setup() {
   Serial.begin(115200);
   
-  // 1. INIT DISPLAY & SHOW LOGO
   setup_display();
-  present_logo(); // Shows logo for 5 seconds
+  present_logo(); 
   
-  // 2. Continue Boot
   display.clear();
   display.drawString(0, 0, "Booting System...");
   display.display();
@@ -264,7 +338,9 @@ void setup() {
   
   wm.startWebPortal();
   client.setServer(mqtt_server, atoi(mqtt_port));
-  
+  // Increase buffer size for discovery payloads
+  client.setBufferSize(1024); 
+
   display.clear();
   display.setFont(ArialMT_Plain_16);
   display.drawString(0, 0, "Gateway Ready");
@@ -327,37 +403,69 @@ void loop() {
 
   int packetSize = LoRa.parsePacket();
   if (packetSize) {
-    String incoming = "";
+    // 1. Read Raw Data
+    String raw_data = "";
     while (LoRa.available()) {
-      incoming += (char)LoRa.read();
+      raw_data += (char)LoRa.read();
     }
-    
-    Serial.print("RX: ");
-    Serial.println(incoming);
 
-    // 1. Parse JSON
-    StaticJsonDocument<256> doc;
-    DeserializationError error = deserializeJson(doc, incoming);
+    int rssi = LoRa.packetRssi();
+    
+    // 2. Parse JSON
+    StaticJsonDocument<300> doc; 
+    DeserializationError error = deserializeJson(doc, raw_data);
     
     String finalTopic = mqtt_topic; 
-    
-    if (!error && doc.containsKey("id")) {
-        String id = doc["id"].as<String>();
-        id.toLowerCase();
-        finalTopic = String(mqtt_topic) + "/" + id;
+    String incoming = ""; 
+
+    if (!error) {
+        // 3. INJECT RSSI
+        doc["rssi"] = rssi; 
+
+        // 4. Determine Topic & Auto-Discovery
+        if (doc.containsKey("id")) {
+            String id = doc["id"].as<String>();
+            
+            // Auto-Discovery Check
+            bool alreadyDiscovered = false;
+            for(String s : discovered_nodes) {
+              if (s == id) alreadyDiscovered = true;
+            }
+            
+            if(!alreadyDiscovered) {
+              sendAutoDiscovery(id);
+              discovered_nodes.push_back(id);
+            }
+
+            String safe_id = id;
+            safe_id.toLowerCase();
+            finalTopic = String(mqtt_topic) + "/" + safe_id;
+        }
+
+        // 5. SAVE MODIFIED JSON TO 'incoming'
+        serializeJson(doc, incoming);
+
+        // 6. PRINT TO TERMINAL
+        Serial.print("RX: ");
+        Serial.println(incoming); 
+
+        // 7. SEND TO MQTT
+        client.publish(finalTopic.c_str(), incoming.c_str());
+        
+        // 8. UPDATE SCREEN
+        wakeDisplay(5000);
+        display.clear();
+        display.setFont(ArialMT_Plain_10);
+        display.drawString(0, 0, "Fwd: " + finalTopic);
+        display.drawStringMaxWidth(0, 15, 128, incoming);
+        drawFooter();
+        display.display();
+
     } else {
-        Serial.println("JSON Error/No ID, using base topic");
+        // Fallback for non-JSON packets
+        Serial.print("RX (Raw): ");
+        Serial.println(raw_data);
+        client.publish(finalTopic.c_str(), raw_data.c_str());
     }
-
-    client.publish(finalTopic.c_str(), incoming.c_str());
-
-    wakeDisplay(5000);
-    display.clear();
-    display.setFont(ArialMT_Plain_10);
-    display.drawString(0, 0, "Fwd: " + finalTopic);
-    display.drawStringMaxWidth(0, 15, 128, incoming);
-    display.drawString(0, 35, "RSSI: " + String(LoRa.packetRssi()) + "dBm");
-    drawFooter();
-    display.display();
   }
 }
