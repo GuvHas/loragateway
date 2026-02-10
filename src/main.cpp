@@ -430,6 +430,7 @@ void setup() {
     while (1) delay(1000);
   }
   LoRa.setSpreadingFactor(LORA_SF);
+  LoRa.enableCrc();
 
   wm.setConfigPortalBlocking(false);
   wm.setSaveConfigCallback(saveConfigCallback);
