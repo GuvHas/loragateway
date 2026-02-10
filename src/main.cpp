@@ -21,6 +21,7 @@
 #define RST_PIN  23
 #define DI0_PIN  26
 #define BAND 868E6
+#define LORA_SF  9   // Must match sender spreading factor (7-12)
 
 // ==========================================
 //              TIMING CONSTANTS
@@ -421,8 +422,6 @@ void setup() {
 
   SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, SS_PIN);
   LoRa.setPins(SS_PIN, RST_PIN, DI0_PIN);
-  // NOTE: Only enable LoRa.enableCrc() here once your sender nodes also
-  // call LoRa.enableCrc(). CRC must match on both sides or packets are dropped.
   if (!LoRa.begin(BAND)) {
     Serial.println("LoRa Failed!");
     display.drawString(0, 15, "LoRa Hardware Fail!");
@@ -430,6 +429,7 @@ void setup() {
     // Let watchdog handle the reset instead of spinning forever
     while (1) delay(1000);
   }
+  LoRa.setSpreadingFactor(LORA_SF);
 
   wm.setConfigPortalBlocking(false);
   wm.setSaveConfigCallback(saveConfigCallback);
