@@ -421,8 +421,8 @@ void setup() {
 
   SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, SS_PIN);
   LoRa.setPins(SS_PIN, RST_PIN, DI0_PIN);
-  // Enable CRC checking so corrupted packets are rejected
-  LoRa.enableCrc();
+  // NOTE: Only enable LoRa.enableCrc() here once your sender nodes also
+  // call LoRa.enableCrc(). CRC must match on both sides or packets are dropped.
   if (!LoRa.begin(BAND)) {
     Serial.println("LoRa Failed!");
     display.drawString(0, 15, "LoRa Hardware Fail!");
