@@ -12,4 +12,5 @@ Temperature
 ### Diagnostic
 Boot Count
 Error
+
 <img width="269" height="514" alt="sensors" src="https://github.com/user-attachments/assets/bf4b0f77-60e1-406b-83ec-b9e33ca077f9" />
