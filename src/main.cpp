@@ -41,6 +41,7 @@
 #define MQTT_BUFFER_SIZE 1024
 #define FIELD_LEN        40
 #define PORT_LEN         6
+#define ALLOWLIST_LEN    200
 #define LORA_MAX_PACKET  255
 
 // ==========================================
@@ -117,6 +118,7 @@ char mqtt_user[FIELD_LEN] = "";
 char mqtt_pass[FIELD_LEN] = "";
 char mqtt_topic[FIELD_LEN] = "lora/incoming";
 char device_name[FIELD_LEN] = "LoRaGateway";
+char allowed_nodes[ALLOWLIST_LEN] = "";  // Comma-separated node IDs, empty = allow all
 
 bool shouldSaveConfig = false;
 unsigned long lastScreenUpdate = 0;
@@ -144,6 +146,7 @@ WiFiManagerParameter custom_mqtt_port("port", "MQTT Port", "1883", PORT_LEN);
 WiFiManagerParameter custom_mqtt_user("user", "MQTT User", "", FIELD_LEN);
 WiFiManagerParameter custom_mqtt_pass("pass", "MQTT Password", "", FIELD_LEN);
 WiFiManagerParameter custom_mqtt_topic("topic", "MQTT Base Topic", "lora/incoming", FIELD_LEN);
+WiFiManagerParameter custom_allowed_nodes("allow", "Allowed Nodes (comma-separated, empty=all)", "", ALLOWLIST_LEN);
 
 void saveConfigCallback () {
   Serial.println("Settings changed via Web Portal!");
@@ -158,6 +161,26 @@ void saveConfigCallback () {
 void safeCopy(char* dest, const char* src, size_t destSize) {
   strncpy(dest, src, destSize - 1);
   dest[destSize - 1] = '\0';
+}
+
+// Check if a node ID is in the allow list (empty list = allow all)
+bool isNodeAllowed(const String& id) {
+  if (strlen(allowed_nodes) == 0) return true;  // Empty = allow all
+
+  String list = String(allowed_nodes);
+  list.trim();
+  if (list.length() == 0) return true;
+
+  int start = 0;
+  while (start <= (int)list.length()) {
+    int comma = list.indexOf(',', start);
+    if (comma == -1) comma = list.length();
+    String entry = list.substring(start, comma);
+    entry.trim();
+    if (entry.equalsIgnoreCase(id)) return true;
+    start = comma + 1;
+  }
+  return false;
 }
 
 // Build the MQTT availability topic from the base topic
@@ -410,6 +433,7 @@ void setup() {
   if(preferences.getString("devname", "").length() > 0){
      preferences.getString("devname").toCharArray(device_name, FIELD_LEN);
   }
+  preferences.getString("allow", "").toCharArray(allowed_nodes, ALLOWLIST_LEN);
 
   WiFi.setHostname(device_name);
 
@@ -419,6 +443,7 @@ void setup() {
   custom_mqtt_pass.setValue(mqtt_pass, FIELD_LEN);
   custom_mqtt_topic.setValue(mqtt_topic, FIELD_LEN);
   custom_device_name.setValue(device_name, FIELD_LEN);
+  custom_allowed_nodes.setValue(allowed_nodes, ALLOWLIST_LEN);
 
   SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, SS_PIN);
   LoRa.setPins(SS_PIN, RST_PIN, DI0_PIN);
@@ -440,6 +465,7 @@ void setup() {
   wm.addParameter(&custom_mqtt_user);
   wm.addParameter(&custom_mqtt_pass);
   wm.addParameter(&custom_mqtt_topic);
+  wm.addParameter(&custom_allowed_nodes);
 
   display.clear();
   display.drawString(0, 0, "Connecting WiFi...");
@@ -525,7 +551,8 @@ void loop() {
     safeCopy(mqtt_user,   custom_mqtt_user.getValue(),   sizeof(mqtt_user));
     safeCopy(mqtt_pass,   custom_mqtt_pass.getValue(),   sizeof(mqtt_pass));
     safeCopy(mqtt_topic,  custom_mqtt_topic.getValue(),  sizeof(mqtt_topic));
-    safeCopy(device_name, custom_device_name.getValue(), sizeof(device_name));
+    safeCopy(device_name,    custom_device_name.getValue(),   sizeof(device_name));
+    safeCopy(allowed_nodes,  custom_allowed_nodes.getValue(), sizeof(allowed_nodes));
 
     preferences.putString("server", mqtt_server);
     preferences.putString("port", mqtt_port);
@@ -533,6 +560,7 @@ void loop() {
     preferences.putString("pass", mqtt_pass);
     preferences.putString("topic", mqtt_topic);
     preferences.putString("devname", device_name);
+    preferences.putString("allow", allowed_nodes);
 
     // Force re-discovery after config change (topic may have changed)
     discovered_nodes.clear();
@@ -585,14 +613,23 @@ void loop() {
     String incoming;
 
     if (!error) {
-        // 3. Inject RSSI
-        doc["rssi"] = rssi;
-
-        // 4. Determine Topic & Auto-Discovery
+        // 3. Check allow list before processing
         if (doc.containsKey("id")) {
             String id = doc["id"].as<String>();
 
-            // O(log n) lookup via std::set instead of O(n) vector scan
+            if (!isNodeAllowed(id)) {
+              Serial.println("RX BLOCKED: " + id + " (not in allow list)");
+              wakeDisplay(WAKE_ON_PACKET_MS);
+              display.clear();
+              display.setFont(ArialMT_Plain_10);
+              display.drawString(0, 0, "BLOCKED: " + id);
+              display.drawString(0, 15, "Not in allow list");
+              drawFooter();
+              display.display();
+              return;
+            }
+
+            // Auto-Discovery for allowed nodes
             if (discovered_nodes.find(id) == discovered_nodes.end()) {
               sendAutoDiscovery(id);
               discovered_nodes.insert(id);
@@ -602,6 +639,9 @@ void loop() {
             safe_id.toLowerCase();
             finalTopic = String(mqtt_topic) + "/" + safe_id;
         }
+
+        // 4. Inject RSSI
+        doc["rssi"] = rssi;
 
         // 5. Serialize modified JSON
         serializeJson(doc, incoming);
