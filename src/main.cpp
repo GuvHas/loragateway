@@ -547,17 +547,18 @@ void setup() {
 
   wm.setConfigPortalBlocking(false);
   wm.setSaveConfigCallback(saveConfigCallback);
-  wm.setCustomMenuHTML("<br><a href='/devices' style='color:#0fbcf9;font-size:1.1em;'>Manage Devices</a>");
+
+  // Add "Manage Devices" link to the main portal menu
+  const char* menu[] = {"wifi", "param", "info", "custom", "exit"};
+  wm.setMenu(menu, 5);
+  wm.setCustomMenuHTML("<form action='/devices' method='get'><button type='submit'>Manage Devices</button></form>");
+
   wm.addParameter(&custom_device_name);
   wm.addParameter(&custom_mqtt_server);
   wm.addParameter(&custom_mqtt_port);
   wm.addParameter(&custom_mqtt_user);
   wm.addParameter(&custom_mqtt_pass);
   wm.addParameter(&custom_mqtt_topic);
-
-  // Add a link to the device management page in the WiFiManager portal
-  static WiFiManagerParameter devices_link("<br><a href='/devices' style='color:#0fbcf9;font-size:1.1em;'>Manage Devices</a>");
-  wm.addParameter(&devices_link);
 
   display.clear();
   display.drawString(0, 0, "Connecting WiFi...");
