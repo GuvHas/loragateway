@@ -547,6 +547,7 @@ void setup() {
 
   wm.setConfigPortalBlocking(false);
   wm.setSaveConfigCallback(saveConfigCallback);
+  wm.setCustomMenuHTML("<br><a href='/devices' style='color:#0fbcf9;font-size:1.1em;'>Manage Devices</a>");
   wm.addParameter(&custom_device_name);
   wm.addParameter(&custom_mqtt_server);
   wm.addParameter(&custom_mqtt_port);
