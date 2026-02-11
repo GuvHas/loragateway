@@ -555,7 +555,7 @@ void setup() {
   wm.addParameter(&custom_mqtt_topic);
 
   // Add a link to the device management page in the WiFiManager portal
-  WiFiManagerParameter devices_link("<br><a href='/devices' style='color:#0fbcf9;font-size:1.1em;'>Manage Devices</a>");
+  static WiFiManagerParameter devices_link("<br><a href='/devices' style='color:#0fbcf9;font-size:1.1em;'>Manage Devices</a>");
   wm.addParameter(&devices_link);
 
   display.clear();
