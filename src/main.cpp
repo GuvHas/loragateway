@@ -41,6 +41,7 @@
 #define MQTT_BUFFER_SIZE 1024
 #define FIELD_LEN        40
 #define PORT_LEN         6
+#define ALLOWLIST_LEN    200
 #define LORA_MAX_PACKET  255
 
 // ==========================================
@@ -117,6 +118,7 @@ char mqtt_user[FIELD_LEN] = "";
 char mqtt_pass[FIELD_LEN] = "";
 char mqtt_topic[FIELD_LEN] = "lora/incoming";
 char device_name[FIELD_LEN] = "LoRaGateway";
+char allowed_nodes[ALLOWLIST_LEN] = "";
 
 bool shouldSaveConfig = false;
 unsigned long lastScreenUpdate = 0;
@@ -125,7 +127,10 @@ bool isScreenOn = true;
 unsigned long lastStatusPublish = 0;
 unsigned long packetCount = 0;
 
-// Set for O(1) lookup of already-discovered nodes (replaces vector)
+// Nodes seen on-air but not yet approved (in-memory only, re-populated on receive)
+std::set<String> pending_nodes;
+
+// Set for O(1) lookup of already-discovered nodes
 std::set<String> discovered_nodes;
 
 // ==========================================
@@ -154,15 +159,138 @@ void saveConfigCallback () {
 //          SAFE STRING HELPERS
 // ==========================================
 
-// Safe copy into fixed-size char buffer — always null-terminates
 void safeCopy(char* dest, const char* src, size_t destSize) {
   strncpy(dest, src, destSize - 1);
   dest[destSize - 1] = '\0';
 }
 
-// Build the MQTT availability topic from the base topic
+bool isNodeAllowed(const String& id) {
+  String list = String(allowed_nodes);
+  list.trim();
+  if (list.length() == 0) return false;
+
+  int start = 0;
+  while (start <= (int)list.length()) {
+    int comma = list.indexOf(',', start);
+    if (comma == -1) comma = list.length();
+    String entry = list.substring(start, comma);
+    entry.trim();
+    if (entry.equalsIgnoreCase(id)) return true;
+    start = comma + 1;
+  }
+  return false;
+}
+
+void approveNode(const String& id) {
+  if (isNodeAllowed(id)) return;
+
+  String list = String(allowed_nodes);
+  list.trim();
+  if (list.length() > 0) list += ",";
+  list += id;
+  safeCopy(allowed_nodes, list.c_str(), sizeof(allowed_nodes));
+
+  preferences.putString("allow", allowed_nodes);
+  pending_nodes.erase(id);
+  Serial.println("APPROVED node: " + id);
+}
+
+void removeNode(const String& id) {
+  String list = String(allowed_nodes);
+  String newList = "";
+  int start = 0;
+  while (start <= (int)list.length()) {
+    int comma = list.indexOf(',', start);
+    if (comma == -1) comma = list.length();
+    String entry = list.substring(start, comma);
+    entry.trim();
+    if (!entry.equalsIgnoreCase(id) && entry.length() > 0) {
+      if (newList.length() > 0) newList += ",";
+      newList += entry;
+    }
+    start = comma + 1;
+  }
+  safeCopy(allowed_nodes, newList.c_str(), sizeof(allowed_nodes));
+  preferences.putString("allow", allowed_nodes);
+  discovered_nodes.erase(id);
+  Serial.println("REMOVED node: " + id);
+}
+
 String availabilityTopic() {
   return String(mqtt_topic) + "/gateway/status";
+}
+
+// ==========================================
+//         DEVICE MANAGEMENT WEB PAGE
+// ==========================================
+void handleDevicesPage() {
+  String html = "<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>";
+  html += "<title>Device Management</title>";
+  html += "<style>";
+  html += "body{font-family:sans-serif;margin:20px;background:#1a1a2e;color:#e0e0e0;}";
+  html += "h1{color:#0fbcf9;}h2{color:#aaa;border-bottom:1px solid #333;padding-bottom:5px;}";
+  html += ".dev{display:flex;justify-content:space-between;align-items:center;padding:10px;margin:5px 0;background:#16213e;border-radius:6px;}";
+  html += ".dev .name{font-size:1.1em;font-weight:bold;}";
+  html += ".btn{padding:8px 16px;border:none;border-radius:4px;cursor:pointer;font-size:0.9em;text-decoration:none;color:#fff;}";
+  html += ".approve{background:#27ae60;}.remove{background:#c0392b;}";
+  html += ".none{color:#666;font-style:italic;padding:10px;}";
+  html += "a.back{color:#0fbcf9;display:inline-block;margin-top:15px;}";
+  html += "</style></head><body>";
+  html += "<h1>Device Management</h1>";
+
+  // --- Pending (unapproved) nodes ---
+  html += "<h2>Pending Devices</h2>";
+  if (pending_nodes.empty()) {
+    html += "<div class='none'>No new devices detected yet.</div>";
+  } else {
+    for (const String& id : pending_nodes) {
+      html += "<div class='dev'><span class='name'>" + id + "</span>";
+      html += "<a class='btn approve' href='/approve?id=" + id + "'>Approve</a></div>";
+    }
+  }
+
+  // --- Approved nodes ---
+  html += "<h2>Approved Devices</h2>";
+  String list = String(allowed_nodes);
+  list.trim();
+  if (list.length() == 0) {
+    html += "<div class='none'>No approved devices.</div>";
+  } else {
+    int start = 0;
+    while (start <= (int)list.length()) {
+      int comma = list.indexOf(',', start);
+      if (comma == -1) comma = list.length();
+      String entry = list.substring(start, comma);
+      entry.trim();
+      if (entry.length() > 0) {
+        html += "<div class='dev'><span class='name'>" + entry + "</span>";
+        html += "<a class='btn remove' href='/remove?id=" + entry + "'>Remove</a></div>";
+      }
+      start = comma + 1;
+    }
+  }
+
+  html += "<a class='back' href='/'>Back to settings</a>";
+  html += "</body></html>";
+  wm.server->send(200, "text/html", html);
+}
+
+void handleApprove() {
+  if (wm.server->hasArg("id")) {
+    String id = wm.server->arg("id");
+    approveNode(id);
+  }
+  wm.server->sendHeader("Location", "/devices", true);
+  wm.server->send(302, "text/plain", "Redirecting...");
+}
+
+void handleRemove() {
+  if (wm.server->hasArg("id")) {
+    String id = wm.server->arg("id");
+    removeNode(id);
+  }
+  wm.server->sendHeader("Location", "/devices", true);
+  wm.server->send(302, "text/plain", "Redirecting...");
 }
 
 // ==========================================
@@ -218,12 +346,10 @@ void reconnect() {
     client.setServer(mqtt_server, port);
     String clientId = String(device_name) + "-" + String(random(0xffff), HEX);
 
-    // Connect with Last Will and Testament so HA knows when we go offline
     String lwt_topic = availabilityTopic();
     if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass,
                        lwt_topic.c_str(), 1, true, "offline")) {
       Serial.println("connected");
-      // Publish online status (retained)
       client.publish(lwt_topic.c_str(), "online", true);
       display.clear();
       display.drawString(0, 0, "MQTT Connected!");
@@ -268,10 +394,8 @@ void sendAutoDiscovery(const String& node_id) {
   String state_topic = String(mqtt_topic) + "/" + safe_id;
   String avail_topic = availabilityTopic();
 
-  // Reuse one document buffer, clearing between sensors
   StaticJsonDocument<600> doc;
 
-  // Shared device info
   JsonObject dev = doc.createNestedObject("dev");
   dev["ids"] = "lora_" + safe_id;
   dev["name"] = node_id;
@@ -279,13 +403,9 @@ void sendAutoDiscovery(const String& node_id) {
   dev["mf"] = "DIY";
   dev["via_device"] = String(device_name);
 
-  // Capture the device object so we can reattach it after clearing
   String dev_buf;
   serializeJson(dev, dev_buf);
 
-  // Helper lambda to publish a single sensor config
-  // component: "sensor" or "binary_sensor"
-  // ent_cat: "" for default, "diagnostic" for diagnostic entities
   auto publishEntity = [&](const char* component, const char* suffix,
                            const char* name_suffix, const char* val_tpl,
                            const char* unit, const char* dev_class,
@@ -302,7 +422,6 @@ void sendAutoDiscovery(const String& node_id) {
     if (precision >= 0) {
       doc["sugg_dsp_prec"] = precision;
     }
-    // Re-attach device info
     StaticJsonDocument<200> dev_doc;
     deserializeJson(dev_doc, dev_buf);
     doc["dev"] = dev_doc.as<JsonObject>();
@@ -313,29 +432,24 @@ void sendAutoDiscovery(const String& node_id) {
     client.publish(topic.c_str(), buffer.c_str(), true);
   };
 
-  // --- Core sensors ---
   publishEntity("sensor", "t", "Temperature", "{{ value_json.t }}", "\u00b0C", "temperature");
   publishEntity("sensor", "h", "Humidity",    "{{ value_json.h }}", "%",    "humidity");
   publishEntity("sensor", "v", "Battery",     "{{ value_json.v }}", "V",    "voltage", "", 2);
   publishEntity("sensor", "r", "Signal",      "{{ value_json.rssi }}", "dBm", "signal_strength");
 
-  // --- Boot counter (diagnostic) ---
   publishEntity("sensor", "boot", "Boot Count",
                 "{{ value_json.boot | default(0) }}", "restarts", "",
                 "diagnostic");
 
-  // --- Low battery binary sensor ---
   publishEntity("binary_sensor", "lb", "Low Battery",
                 "{{ 'ON' if value_json.lb is defined and value_json.lb == 1 else 'OFF' }}",
                 "", "battery");
 
-  // --- Error status (diagnostic) ---
   publishEntity("sensor", "err", "Error",
                 "{{ value_json.err | default('none') }}", "", "",
                 "diagnostic");
 }
 
-// Send auto-discovery for the gateway device itself
 void sendGatewayDiscovery() {
   String avail_topic = availabilityTopic();
   String state_topic = String(mqtt_topic) + "/gateway/state";
@@ -387,7 +501,6 @@ void sendGatewayDiscovery() {
 void setup() {
   Serial.begin(115200);
 
-  // Enable hardware watchdog — resets the device if loop() hangs
   esp_task_wdt_init(WDT_TIMEOUT_S, true);
   esp_task_wdt_add(NULL);
 
@@ -410,6 +523,7 @@ void setup() {
   if(preferences.getString("devname", "").length() > 0){
      preferences.getString("devname").toCharArray(device_name, FIELD_LEN);
   }
+  preferences.getString("allow", "").toCharArray(allowed_nodes, ALLOWLIST_LEN);
 
   WiFi.setHostname(device_name);
 
@@ -426,7 +540,6 @@ void setup() {
     Serial.println("LoRa Failed!");
     display.drawString(0, 15, "LoRa Hardware Fail!");
     display.display();
-    // Let watchdog handle the reset instead of spinning forever
     while (1) delay(1000);
   }
   LoRa.setSpreadingFactor(LORA_SF);
@@ -441,6 +554,10 @@ void setup() {
   wm.addParameter(&custom_mqtt_pass);
   wm.addParameter(&custom_mqtt_topic);
 
+  // Add a link to the device management page in the WiFiManager portal
+  static WiFiManagerParameter devices_link("<br><a href='/devices' style='color:#0fbcf9;font-size:1.1em;'>Manage Devices</a>");
+  wm.addParameter(&devices_link);
+
   display.clear();
   display.drawString(0, 0, "Connecting WiFi...");
   display.drawString(0, 15, "AP: LoRaGateway-Setup");
@@ -453,6 +570,12 @@ void setup() {
   }
 
   wm.startWebPortal();
+
+  // Register custom device management routes on WiFiManager's web server
+  wm.server->on("/devices", handleDevicesPage);
+  wm.server->on("/approve", handleApprove);
+  wm.server->on("/remove",  handleRemove);
+
   client.setServer(mqtt_server, atoi(mqtt_port));
   client.setBufferSize(MQTT_BUFFER_SIZE);
 
@@ -499,7 +622,6 @@ void setup() {
 //                 LOOP
 // ==========================================
 void loop() {
-  // Feed the watchdog each iteration
   esp_task_wdt_reset();
 
   wm.process();
@@ -534,7 +656,6 @@ void loop() {
     preferences.putString("topic", mqtt_topic);
     preferences.putString("devname", device_name);
 
-    // Force re-discovery after config change (topic may have changed)
     discovered_nodes.clear();
     client.disconnect();
 
@@ -552,10 +673,8 @@ void loop() {
       }
       client.loop();
 
-      // Periodically publish gateway health status
       if (client.connected() && (millis() - lastStatusPublish > STATUS_PUBLISH_MS)) {
         lastStatusPublish = millis();
-        // Send gateway auto-discovery once (on first status publish)
         static bool gatewayDiscoverySent = false;
         if (!gatewayDiscoverySent) {
           sendGatewayDiscovery();
@@ -567,7 +686,6 @@ void loop() {
 
   int packetSize = LoRa.parsePacket();
   if (packetSize) {
-    // 1. Read raw data — pre-allocate to avoid repeated heap allocs
     String raw_data;
     raw_data.reserve(packetSize);
     while (LoRa.available()) {
@@ -577,7 +695,6 @@ void loop() {
     int rssi = LoRa.packetRssi();
     packetCount++;
 
-    // 2. Parse JSON
     StaticJsonDocument<300> doc;
     DeserializationError error = deserializeJson(doc, raw_data);
 
@@ -585,14 +702,24 @@ void loop() {
     String incoming;
 
     if (!error) {
-        // 3. Inject RSSI
-        doc["rssi"] = rssi;
-
-        // 4. Determine Topic & Auto-Discovery
         if (doc.containsKey("id")) {
             String id = doc["id"].as<String>();
 
-            // O(log n) lookup via std::set instead of O(n) vector scan
+            if (!isNodeAllowed(id)) {
+              // Track as pending — will appear on the /devices web page
+              pending_nodes.insert(id);
+              Serial.println("RX PENDING: " + id + " — approve via http://" + WiFi.localIP().toString() + "/devices");
+              wakeDisplay(WAKE_ON_PACKET_MS);
+              display.clear();
+              display.setFont(ArialMT_Plain_10);
+              display.drawString(0, 0, "New device: " + id);
+              display.drawString(0, 15, "Approve at:");
+              display.drawString(0, 30, "http://" + WiFi.localIP().toString() + "/devices");
+              drawFooter();
+              display.display();
+              return;
+            }
+
             if (discovered_nodes.find(id) == discovered_nodes.end()) {
               sendAutoDiscovery(id);
               discovered_nodes.insert(id);
@@ -603,17 +730,14 @@ void loop() {
             finalTopic = String(mqtt_topic) + "/" + safe_id;
         }
 
-        // 5. Serialize modified JSON
+        doc["rssi"] = rssi;
         serializeJson(doc, incoming);
 
-        // 6. Print to terminal
         Serial.print("RX: ");
         Serial.println(incoming);
 
-        // 7. Send to MQTT
         client.publish(finalTopic.c_str(), incoming.c_str());
 
-        // 8. Update screen
         wakeDisplay(WAKE_ON_PACKET_MS);
         display.clear();
         display.setFont(ArialMT_Plain_10);
@@ -623,7 +747,6 @@ void loop() {
         display.display();
 
     } else {
-        // Fallback for non-JSON packets
         Serial.print("RX (Raw): ");
         Serial.println(raw_data);
         client.publish(finalTopic.c_str(), raw_data.c_str());
