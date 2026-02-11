@@ -22,6 +22,7 @@
 #define DI0_PIN  26
 #define BAND 868E6
 #define LORA_SF  9   // Must match sender spreading factor (7-12)
+#define BUTTON_PIN 0 // PRG button on TTGO LoRa32 V2.1 (active LOW)
 
 // ==========================================
 //              TIMING CONSTANTS
@@ -34,6 +35,8 @@
 #define WAKE_ON_PACKET_MS      5000
 #define STATUS_PUBLISH_MS      60000
 #define WDT_TIMEOUT_S          30
+#define APPROVE_TIMEOUT_MS     30000
+#define DEBOUNCE_MS            200
 
 // ==========================================
 //              BUFFER SIZES
@@ -127,6 +130,13 @@ bool isScreenOn = true;
 unsigned long lastStatusPublish = 0;
 unsigned long packetCount = 0;
 
+// Pending approval state
+String pendingNodeId = "";
+String pendingPayload = "";  // Buffered JSON so we can forward on approve
+int pendingRssi = 0;
+unsigned long pendingTimestamp = 0;
+unsigned long lastButtonPress = 0;
+
 // Set for O(1) lookup of already-discovered nodes (replaces vector)
 std::set<String> discovered_nodes;
 
@@ -146,7 +156,7 @@ WiFiManagerParameter custom_mqtt_port("port", "MQTT Port", "1883", PORT_LEN);
 WiFiManagerParameter custom_mqtt_user("user", "MQTT User", "", FIELD_LEN);
 WiFiManagerParameter custom_mqtt_pass("pass", "MQTT Password", "", FIELD_LEN);
 WiFiManagerParameter custom_mqtt_topic("topic", "MQTT Base Topic", "lora/incoming", FIELD_LEN);
-WiFiManagerParameter custom_allowed_nodes("allow", "Allowed Nodes (comma-separated, empty=all)", "", ALLOWLIST_LEN);
+WiFiManagerParameter custom_allowed_nodes("allow", "Approved Nodes (auto-filled, editable)", "", ALLOWLIST_LEN);
 
 void saveConfigCallback () {
   Serial.println("Settings changed via Web Portal!");
@@ -163,13 +173,11 @@ void safeCopy(char* dest, const char* src, size_t destSize) {
   dest[destSize - 1] = '\0';
 }
 
-// Check if a node ID is in the allow list (empty list = allow all)
+// Check if a node ID is in the approved list
 bool isNodeAllowed(const String& id) {
-  if (strlen(allowed_nodes) == 0) return true;  // Empty = allow all
-
   String list = String(allowed_nodes);
   list.trim();
-  if (list.length() == 0) return true;
+  if (list.length() == 0) return false;  // Empty = no nodes approved yet
 
   int start = 0;
   while (start <= (int)list.length()) {
@@ -181,6 +189,22 @@ bool isNodeAllowed(const String& id) {
     start = comma + 1;
   }
   return false;
+}
+
+// Add a node ID to the approved list and persist to NVS
+void approveNode(const String& id) {
+  // Don't double-add
+  if (isNodeAllowed(id)) return;
+
+  String list = String(allowed_nodes);
+  list.trim();
+  if (list.length() > 0) list += ",";
+  list += id;
+  safeCopy(allowed_nodes, list.c_str(), sizeof(allowed_nodes));
+
+  preferences.putString("allow", allowed_nodes);
+  custom_allowed_nodes.setValue(allowed_nodes, ALLOWLIST_LEN);
+  Serial.println("APPROVED node: " + id);
 }
 
 // Build the MQTT availability topic from the base topic
@@ -414,6 +438,8 @@ void setup() {
   esp_task_wdt_init(WDT_TIMEOUT_S, true);
   esp_task_wdt_add(NULL);
 
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
   setup_display();
   present_logo();
 
@@ -536,6 +562,67 @@ void loop() {
     isScreenOn = false;
   }
 
+  // --- Handle pending approval ---
+  if (pendingNodeId.length() > 0) {
+    unsigned long elapsed = millis() - pendingTimestamp;
+
+    // Button press = approve (debounced, active LOW)
+    if (digitalRead(BUTTON_PIN) == LOW && (millis() - lastButtonPress > DEBOUNCE_MS)) {
+      lastButtonPress = millis();
+      approveNode(pendingNodeId);
+
+      // Forward the buffered packet now
+      String id = pendingNodeId;
+      String safe_id = id;
+      safe_id.toLowerCase();
+      String finalTopic = String(mqtt_topic) + "/" + safe_id;
+
+      // Run auto-discovery for the newly approved node
+      if (discovered_nodes.find(id) == discovered_nodes.end()) {
+        sendAutoDiscovery(id);
+        discovered_nodes.insert(id);
+      }
+
+      // Re-parse buffered payload to inject RSSI
+      StaticJsonDocument<300> doc;
+      if (!deserializeJson(doc, pendingPayload)) {
+        doc["rssi"] = pendingRssi;
+        String outgoing;
+        serializeJson(doc, outgoing);
+        client.publish(finalTopic.c_str(), outgoing.c_str());
+        Serial.print("RX (approved+fwd): ");
+        Serial.println(outgoing);
+      }
+
+      wakeDisplay(WAKE_ON_PACKET_MS);
+      display.clear();
+      display.setFont(ArialMT_Plain_16);
+      display.drawString(0, 0, "APPROVED");
+      display.setFont(ArialMT_Plain_10);
+      display.drawString(0, 20, id);
+      display.drawString(0, 35, "Forwarded to MQTT");
+      drawFooter();
+      display.display();
+
+      pendingNodeId = "";
+      pendingPayload = "";
+    }
+    // Timeout = deny (silently drop, will prompt again next packet)
+    else if (elapsed > APPROVE_TIMEOUT_MS) {
+      Serial.println("DENIED (timeout): " + pendingNodeId);
+      wakeDisplay(WAKE_ON_PACKET_MS);
+      display.clear();
+      display.setFont(ArialMT_Plain_10);
+      display.drawString(0, 0, "DENIED: " + pendingNodeId);
+      display.drawString(0, 15, "Approval timed out");
+      drawFooter();
+      display.display();
+
+      pendingNodeId = "";
+      pendingPayload = "";
+    }
+  }
+
   if (shouldSaveConfig) {
     shouldSaveConfig = false;
     wakeDisplay(WAKE_ON_SAVE_MS);
@@ -613,23 +700,31 @@ void loop() {
     String incoming;
 
     if (!error) {
-        // 3. Check allow list before processing
+        // 3. Check approval status
         if (doc.containsKey("id")) {
             String id = doc["id"].as<String>();
 
             if (!isNodeAllowed(id)) {
-              Serial.println("RX BLOCKED: " + id + " (not in allow list)");
-              wakeDisplay(WAKE_ON_PACKET_MS);
+              // Unknown node — prompt for approval on OLED
+              pendingNodeId = id;
+              pendingPayload = raw_data;
+              pendingRssi = rssi;
+              pendingTimestamp = millis();
+
+              Serial.println("RX NEW NODE: " + id + " — press PRG to approve");
+              wakeDisplay(APPROVE_TIMEOUT_MS);
               display.clear();
+              display.setFont(ArialMT_Plain_16);
+              display.drawString(0, 0, "New device:");
               display.setFont(ArialMT_Plain_10);
-              display.drawString(0, 0, "BLOCKED: " + id);
-              display.drawString(0, 15, "Not in allow list");
+              display.drawString(0, 20, id);
+              display.drawString(0, 35, "PRG=Approve  Wait=Deny");
               drawFooter();
               display.display();
               return;
             }
 
-            // Auto-Discovery for allowed nodes
+            // Approved node — auto-discovery and forward
             if (discovered_nodes.find(id) == discovered_nodes.end()) {
               sendAutoDiscovery(id);
               discovered_nodes.insert(id);
