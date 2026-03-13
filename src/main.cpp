@@ -450,7 +450,7 @@ void sendAutoDiscovery(const String& node_id) {
                 "", "battery");
 
   publishEntity("sensor", "err", "Error",
-                "{{ value_json.err | default('none') }}", "", "",
+                "{{ value_json.err | default('none', true) }}", "", "",
                 "diagnostic");
 }
 
@@ -737,6 +737,11 @@ void loop() {
         }
 
         doc["rssi"] = rssi;
+        // Normalize optional sender error field so HA error sensor clears to "none"
+        // on healthy packets where sender omits `err`.
+        if (!doc.containsKey("err")) {
+          doc["err"] = "none";
+        }
         serializeJson(doc, incoming);
 
         Serial.print("RX: ");
