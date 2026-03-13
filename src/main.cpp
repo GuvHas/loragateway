@@ -441,12 +441,16 @@ void sendAutoDiscovery(const String& node_id) {
                 "{{ value_json.boot | default(0) }}", "restarts", "",
                 "diagnostic");
 
+  publishEntity("sensor", "seq", "Sequence",
+                "{{ value_json.seq | default(0) }}", "", "",
+                "diagnostic");
+
   publishEntity("binary_sensor", "lb", "Low Battery",
                 "{{ 'ON' if value_json.lb is defined and value_json.lb == 1 else 'OFF' }}",
                 "", "battery");
 
   publishEntity("sensor", "err", "Error",
-                "{{ value_json.err | default('none') }}", "", "",
+                "{{ value_json.err | default('none', true) }}", "", "",
                 "diagnostic");
 }
 
@@ -697,7 +701,7 @@ void loop() {
     int rssi = LoRa.packetRssi();
     packetCount++;
 
-    StaticJsonDocument<300> doc;
+    StaticJsonDocument<512> doc;
     DeserializationError error = deserializeJson(doc, raw_data);
 
     String finalTopic = mqtt_topic;
@@ -733,6 +737,11 @@ void loop() {
         }
 
         doc["rssi"] = rssi;
+        // Normalize optional sender error field so HA error sensor clears to "none"
+        // on healthy packets where sender omits `err`.
+        if (!doc.containsKey("err")) {
+          doc["err"] = "none";
+        }
         serializeJson(doc, incoming);
 
         Serial.print("RX: ");
