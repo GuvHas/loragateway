@@ -17,3 +17,4 @@ Sequence
 
 <img width="334" height="233" alt="diagnostic" src="https://github.com/user-attachments/assets/9dda212a-3eea-4a78-8e33-3c9b1c14ef37" />
 
+Sensor repo: https://github.com/GuvHas/loratemp
