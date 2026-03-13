@@ -8,9 +8,12 @@ Humidity
 Low Battery  
 Signal  
 Temperature  
+<img width="330" height="332" alt="sensors" src="https://github.com/user-attachments/assets/e36319d5-3c55-4dd2-af00-ee542f39a500" />
 
 ### Diagnostic
 Boot Count  
 Error  
+Sequence
 
-<img width="269" height="514" alt="sensors" src="https://github.com/user-attachments/assets/bf4b0f77-60e1-406b-83ec-b9e33ca077f9" />
+<img width="334" height="233" alt="diagnostic" src="https://github.com/user-attachments/assets/9dda212a-3eea-4a78-8e33-3c9b1c14ef37" />
+
