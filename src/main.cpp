@@ -365,15 +365,32 @@ void reconnect() {
 // ==========================================
 //         GATEWAY STATUS PUBLISHING
 // ==========================================
+
+// Fills in every optional sensor field so that every MQTT state message
+// contains a consistent, complete set of keys. HA templates that reference
+// a key absent from the payload produce undefined/errors; setting explicit
+// defaults here prevents that without requiring template-level guards.
+void normalizeSensorPayload(JsonDocument& doc) {
+  if (!doc.containsKey("t"))    doc["t"]    = nullptr; // null when DHT read failed
+  if (!doc.containsKey("h"))    doc["h"]    = nullptr;
+  if (!doc.containsKey("lb"))   doc["lb"]   = 0;       // 0 = battery OK
+  if (!doc.containsKey("err"))  doc["err"]  = "none";
+  if (!doc.containsKey("boot")) doc["boot"] = 0;
+  if (!doc.containsKey("seq"))  doc["seq"]  = 0;
+}
+
 void publishGatewayStatus() {
   if (!client.connected()) return;
 
-  StaticJsonDocument<256> doc;
-  doc["uptime_s"] = millis() / 1000;
-  doc["free_heap"] = ESP.getFreeHeap();
-  doc["wifi_rssi"] = WiFi.RSSI();
+  StaticJsonDocument<320> doc;
+  doc["uptime_s"]   = millis() / 1000;
+  doc["free_heap"]  = ESP.getFreeHeap();
+  doc["wifi_rssi"]  = WiFi.RSSI();
   doc["packets_rx"] = packetCount;
-  doc["ip"] = WiFi.localIP().toString();
+  doc["ip"]         = WiFi.localIP().toString();
+  doc["enablecrc"]  = true;                        // LoRa.enableCrc() is called unconditionally in setup
+  doc["invertiq"]   = false;                       // IQ inversion is not used on this gateway
+  doc["onlyknown"]  = (strlen(allowed_nodes) > 0); // true when an allowlist is configured
 
   String payload;
   serializeJson(doc, payload);
@@ -737,11 +754,7 @@ void loop() {
         }
 
         doc["rssi"] = rssi;
-        // Normalize optional sender error field so HA error sensor clears to "none"
-        // on healthy packets where sender omits `err`.
-        if (!doc.containsKey("err")) {
-          doc["err"] = "none";
-        }
+        normalizeSensorPayload(doc);
         serializeJson(doc, incoming);
 
         Serial.print("RX: ");
