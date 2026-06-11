@@ -373,6 +373,7 @@ void reconnect() {
 void normalizeSensorPayload(JsonDocument& doc) {
   if (!doc.containsKey("t"))    doc["t"]    = nullptr; // null when DHT read failed
   if (!doc.containsKey("h"))    doc["h"]    = nullptr;
+  if (!doc.containsKey("v"))    doc["v"]    = nullptr; // null when battery ADC not reported
   if (!doc.containsKey("lb"))   doc["lb"]   = 0;       // 0 = battery OK
   if (!doc.containsKey("err"))  doc["err"]  = "none";
   if (!doc.containsKey("boot")) doc["boot"] = 0;
