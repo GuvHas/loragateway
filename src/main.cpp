@@ -6,11 +6,12 @@
 #include "SSD1306.h"
 #include <WiFiManager.h>
 #include <Preferences.h>
-#include <set>
 #include <string>
 #include <ArduinoOTA.h>
 #include <esp_task_wdt.h>
 
+#include "hal_esp32.h"
+#include "orchestrator.h"
 #include "payload_parser.h"
 
 // ==========================================
@@ -31,7 +32,6 @@
 #define LOGO_DISPLAY_MS        5000
 #define SCREEN_TIMEOUT_MS      30000
 #define MQTT_RECONNECT_MS      5000
-#define WAKE_ON_MQTT_RECONNECT 5000
 #define WAKE_ON_SAVE_MS        10000
 #define WAKE_ON_PACKET_MS      5000
 #define STATUS_PUBLISH_MS      60000
@@ -43,7 +43,6 @@
 #define MQTT_BUFFER_SIZE 1024
 #define FIELD_LEN        40
 #define PORT_LEN         6
-#define ALLOWLIST_LEN    200
 #define LORA_MAX_PACKET  255
 
 // ==========================================
@@ -120,25 +119,17 @@ char mqtt_user[FIELD_LEN] = "";
 char mqtt_pass[FIELD_LEN] = "";
 char mqtt_topic[FIELD_LEN] = "lora/incoming";
 char device_name[FIELD_LEN] = "LoRaGateway";
-char allowed_nodes[ALLOWLIST_LEN] = "";
 
 bool shouldSaveConfig = false;
 unsigned long lastScreenUpdate = 0;
 unsigned long screenTimeout = SCREEN_TIMEOUT_MS;
 bool isScreenOn = true;
 unsigned long lastStatusPublish = 0;
-unsigned long packetCount = 0;
 
-// Nodes seen on-air but not yet approved (in-memory only, re-populated on receive)
-std::set<String> pending_nodes;
-
-// Set for O(1) lookup of already-discovered nodes
-std::set<String> discovered_nodes;
-
-// Pure, natively-unit-tested allowlist logic (test/test_parser). allowed_nodes
-// (the char buffer persisted to Preferences) is kept in sync with this on
-// every change; nothing else should mutate allowed_nodes directly.
-gateway::AllowList g_allowList;
+// Forward declaration: Esp32Display (below) invokes this on every display
+// update so the existing screen-timeout bookkeeping keeps working without
+// that display adapter needing to know about it.
+void wakeDisplay(unsigned long duration_ms);
 
 // ==========================================
 //             GLOBAL OBJECTS
@@ -148,6 +139,19 @@ WiFiClient espClient;
 PubSubClient client(espClient);
 Preferences preferences;
 WiFiManager wm;
+
+// Hardware Abstraction Layer adapters (include/hal_esp32.h) and the
+// orchestrator that owns all LoRa/MQTT/allowlist business logic
+// (include/orchestrator.h, unit-tested natively in test/test_orchestrator).
+gateway::Esp32LoRaReceiver loRaReceiver;
+gateway::Esp32MqttClient mqttAdapter(client);
+gateway::Esp32NodeStore nodeStore(preferences);
+gateway::Esp32Display esp32Display(display, []() { wakeDisplay(WAKE_ON_PACKET_MS); });
+gateway::Esp32Clock esp32Clock;
+
+gateway::GatewayOrchestrator orchestrator(loRaReceiver, mqttAdapter, nodeStore, esp32Display,
+                                           esp32Clock, std::string(device_name),
+                                           std::string(mqtt_topic), MQTT_RECONNECT_MS);
 
 // WiFiManager Parameters
 WiFiManagerParameter custom_device_name("devname", "Device Name", "LoRaGateway", FIELD_LEN);
@@ -175,36 +179,6 @@ gateway::GatewayIdentity currentGatewayIdentity() {
   return gateway::GatewayIdentity{std::string(device_name), std::string(mqtt_topic)};
 }
 
-// Persists g_allowList back to the Preferences-backed CSV buffer. Every
-// mutation of g_allowList must be followed by this.
-void syncAllowListToPreferences() {
-  std::string csv = g_allowList.toCsv();
-  safeCopy(allowed_nodes, csv.c_str(), sizeof(allowed_nodes));
-  preferences.putString("allow", allowed_nodes);
-}
-
-bool isNodeAllowed(const String& id) {
-  return g_allowList.isAllowed(id.c_str());
-}
-
-void approveNode(const String& id) {
-  if (!g_allowList.approve(id.c_str())) return;
-  syncAllowListToPreferences();
-  pending_nodes.erase(id);
-  Serial.println("APPROVED node: " + id);
-}
-
-void removeNode(const String& id) {
-  if (!g_allowList.remove(id.c_str())) return;
-  syncAllowListToPreferences();
-  discovered_nodes.erase(id);
-  Serial.println("REMOVED node: " + id);
-}
-
-String availabilityTopic() {
-  return String(gateway::availabilityTopic(std::string(mqtt_topic)).c_str());
-}
-
 // ==========================================
 //         DEVICE MANAGEMENT WEB PAGE
 // ==========================================
@@ -227,11 +201,12 @@ void handleDevicesPage() {
   // Node ids come from unauthenticated LoRa packets, so they are escaped
   // before being embedded in HTML (see gateway::htmlEscape / test_parser).
   html += "<h2>Pending Devices</h2>";
-  if (pending_nodes.empty()) {
+  auto pendingIds = orchestrator.pendingNodeIds();
+  if (pendingIds.empty()) {
     html += "<div class='none'>No new devices detected yet.</div>";
   } else {
-    for (const String& id : pending_nodes) {
-      String escaped = String(gateway::htmlEscape(id.c_str()).c_str());
+    for (const auto& id : pendingIds) {
+      String escaped = String(gateway::htmlEscape(id).c_str());
       html += "<div class='dev'><span class='name'>" + escaped + "</span>";
       html += "<a class='btn approve' href='/approve?id=" + escaped + "'>Approve</a></div>";
     }
@@ -239,10 +214,10 @@ void handleDevicesPage() {
 
   // --- Approved nodes ---
   html += "<h2>Approved Devices</h2>";
-  if (g_allowList.entries().empty()) {
+  if (orchestrator.allowList().entries().empty()) {
     html += "<div class='none'>No approved devices.</div>";
   } else {
-    for (const auto& entry : g_allowList.entries()) {
+    for (const auto& entry : orchestrator.allowList().entries()) {
       String escaped = String(gateway::htmlEscape(entry).c_str());
       html += "<div class='dev'><span class='name'>" + escaped + "</span>";
       html += "<a class='btn remove' href='/remove?id=" + escaped + "'>Remove</a></div>";
@@ -256,8 +231,7 @@ void handleDevicesPage() {
 
 void handleApprove() {
   if (wm.server->hasArg("id")) {
-    String id = wm.server->arg("id");
-    approveNode(id);
+    orchestrator.approveNode(wm.server->arg("id").c_str());
   }
   wm.server->sendHeader("Location", "/devices", true);
   wm.server->send(302, "text/plain", "Redirecting...");
@@ -265,8 +239,7 @@ void handleApprove() {
 
 void handleRemove() {
   if (wm.server->hasArg("id")) {
-    String id = wm.server->arg("id");
-    removeNode(id);
+    orchestrator.removeNode(wm.server->arg("id").c_str());
   }
   wm.server->sendHeader("Location", "/devices", true);
   wm.server->send(302, "text/plain", "Redirecting...");
@@ -297,82 +270,32 @@ void wakeDisplay(unsigned long duration_ms) {
   screenTimeout = duration_ms;
 }
 
-void drawFooter() {
-  display.drawLine(0, 52, 128, 52);
-  display.setFont(ArialMT_Plain_10);
-  display.drawString(0, 54, WiFi.localIP().toString());
-  long rssi = WiFi.RSSI();
-  int bars = (rssi > -55) ? 4 : (rssi > -65) ? 3 : (rssi > -75) ? 2 : 1;
-  if (rssi == 0) bars = 0;
-  String signalStr = String(bars) + "/4";
-  int strWidth = display.getStringWidth(signalStr);
-  display.drawString(128 - strWidth, 54, signalStr);
-}
-
-void reconnect() {
-  static unsigned long lastReconnectAttempt = 0;
-  unsigned long now = millis();
-
-  if (now - lastReconnectAttempt > MQTT_RECONNECT_MS) {
-    lastReconnectAttempt = now;
-    Serial.print("Connecting to MQTT...");
-    if (!isScreenOn) wakeDisplay(WAKE_ON_MQTT_RECONNECT);
-    display.clear();
-    display.drawString(0, 0, "MQTT Reconnecting...");
-    display.display();
-
-    int port = atoi(mqtt_port);
-    client.setServer(mqtt_server, port);
-    String clientId = String(device_name) + "-" + String(random(0xffff), HEX);
-
-    String lwt_topic = availabilityTopic();
-    if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass,
-                       lwt_topic.c_str(), 1, true, "offline")) {
-      Serial.println("connected");
-      client.publish(lwt_topic.c_str(), "online", true);
-      display.clear();
-      display.drawString(0, 0, "MQTT Connected!");
-      display.display();
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" try again later");
-    }
-  }
-}
-
 // ==========================================
 //         GATEWAY STATUS PUBLISHING
 // ==========================================
+// Per-node auto-discovery, LoRa ingestion/routing, sensor-state publishing
+// and MQTT reconnect are all owned by `orchestrator` (see
+// include/orchestrator.h). What's left here is the gateway's own periodic
+// diagnostic status, which isn't part of that per-packet flow.
 
 void publishGatewayStatus() {
-  if (!client.connected()) return;
+  if (!mqttAdapter.connected()) return;
 
   gateway::GatewayStats stats;
   stats.uptimeSeconds = millis() / 1000;
   stats.freeHeapBytes = ESP.getFreeHeap();
   stats.wifiRssi = WiFi.RSSI();
-  stats.packetsReceived = packetCount;
+  stats.packetsReceived = orchestrator.packetsReceived();
   stats.ipAddress = WiFi.localIP().toString().c_str();
-  stats.onlyKnownNodes = (strlen(allowed_nodes) > 0); // true when an allowlist is configured
+  stats.onlyKnownNodes = !orchestrator.allowList().entries().empty();
 
   gateway::MqttMessage msg = gateway::buildGatewayStatusMessage(currentGatewayIdentity(), stats);
-  client.publish(msg.topic.c_str(), msg.payload.c_str(), true);
-}
-
-// ==========================================
-//        AUTO DISCOVERY FUNCTION
-// ==========================================
-void sendAutoDiscovery(const std::string& node_id) {
-  Serial.println(("Sending Auto Discovery for: " + node_id).c_str());
-  for (const auto& msg : gateway::buildAutoDiscoveryMessages(node_id, currentGatewayIdentity())) {
-    client.publish(msg.topic.c_str(), msg.payload.c_str(), true);
-  }
+  mqttAdapter.publish(msg.topic, msg.payload, true);
 }
 
 void sendGatewayDiscovery() {
   for (const auto& msg : gateway::buildGatewayDiscoveryMessages(currentGatewayIdentity())) {
-    client.publish(msg.topic.c_str(), msg.payload.c_str(), true);
+    mqttAdapter.publish(msg.topic, msg.payload, true);
   }
 }
 
@@ -404,8 +327,11 @@ void setup() {
   if(preferences.getString("devname", "").length() > 0){
      preferences.getString("devname").toCharArray(device_name, FIELD_LEN);
   }
-  preferences.getString("allow", "").toCharArray(allowed_nodes, ALLOWLIST_LEN);
-  g_allowList = gateway::AllowList(std::string(allowed_nodes));
+
+  orchestrator.setIdentity(device_name, mqtt_topic);
+  mqttAdapter.configure(device_name, mqtt_user, mqtt_pass,
+                         gateway::availabilityTopic(std::string(mqtt_topic)));
+  orchestrator.begin(); // loads the persisted allowlist via nodeStore
 
   WiFi.setHostname(device_name);
 
@@ -540,8 +466,12 @@ void loop() {
     preferences.putString("topic", mqtt_topic);
     preferences.putString("devname", device_name);
 
-    discovered_nodes.clear();
-    client.disconnect();
+    orchestrator.setIdentity(device_name, mqtt_topic);
+    orchestrator.clearDiscoveredNodes();
+    mqttAdapter.configure(device_name, mqtt_user, mqtt_pass,
+                           gateway::availabilityTopic(std::string(mqtt_topic)));
+    client.setServer(mqtt_server, atoi(mqtt_port));
+    mqttAdapter.disconnect();
 
     if (nameChanged) {
       WiFi.setHostname(device_name);
@@ -551,89 +481,22 @@ void loop() {
     }
   }
 
-  if (WiFi.status() == WL_CONNECTED) {
-      if (!client.connected()) {
-        reconnect();
-      }
-      client.loop();
+  bool wifiConnected = (WiFi.status() == WL_CONNECTED);
 
-      if (client.connected() && (millis() - lastStatusPublish > STATUS_PUBLISH_MS)) {
-        lastStatusPublish = millis();
-        static bool gatewayDiscoverySent = false;
-        if (!gatewayDiscoverySent) {
-          sendGatewayDiscovery();
-          gatewayDiscoverySent = true;
-        }
-        publishGatewayStatus();
-      }
-  }
+  // All LoRa ingestion, allowlist/routing decisions, sensor-state and
+  // discovery publishing, the store-and-forward queue, and MQTT
+  // connect/backoff live in the orchestrator (include/orchestrator.h),
+  // unit-tested natively in test/test_orchestrator.
+  orchestrator.tick(wifiConnected);
 
-  int packetSize = LoRa.parsePacket();
-  if (packetSize) {
-    String raw_data;
-    raw_data.reserve(packetSize);
-    while (LoRa.available()) {
-      raw_data += (char)LoRa.read();
+  if (wifiConnected && mqttAdapter.connected() &&
+      (millis() - lastStatusPublish > STATUS_PUBLISH_MS)) {
+    lastStatusPublish = millis();
+    static bool gatewayDiscoverySent = false;
+    if (!gatewayDiscoverySent) {
+      sendGatewayDiscovery();
+      gatewayDiscoverySent = true;
     }
-
-    int rssi = LoRa.packetRssi();
-    packetCount++;
-
-    // All parsing/validation (null t/h, wrong types, malformed/truncated
-    // JSON, missing/blank id) and topic-injection sanitization of the id
-    // happen in gateway::parseSensorPayload — see include/payload_parser.h
-    // and test/test_parser for the native unit tests covering these cases.
-    gateway::ParseResult parsed = gateway::parseSensorPayload(raw_data.c_str(), raw_data.length());
-
-    if (parsed.ok()) {
-        const gateway::SensorReading& reading = parsed.reading;
-        String id = String(reading.id.c_str());
-
-        gateway::RoutingResult route =
-            gateway::decideRoute(reading.id, std::string(mqtt_topic), g_allowList);
-
-        if (route.decision == gateway::RouteDecision::Pending) {
-          // Track as pending — will appear on the /devices web page
-          pending_nodes.insert(id);
-          Serial.println("RX PENDING: " + id + " — approve via http://" + WiFi.localIP().toString() + "/devices");
-          wakeDisplay(WAKE_ON_PACKET_MS);
-          display.clear();
-          display.setFont(ArialMT_Plain_10);
-          display.drawString(0, 0, "New device: " + id);
-          display.drawString(0, 15, "Approve at:");
-          display.drawString(0, 30, "http://" + WiFi.localIP().toString() + "/devices");
-          drawFooter();
-          display.display();
-          return;
-        }
-
-        if (discovered_nodes.find(id) == discovered_nodes.end()) {
-          sendAutoDiscovery(reading.id);
-          discovered_nodes.insert(id);
-        }
-
-        gateway::MqttMessage stateMsg = gateway::buildSensorStateMessage(reading, rssi, route.topic);
-
-        Serial.print("RX: ");
-        Serial.println(stateMsg.payload.c_str());
-
-        client.publish(stateMsg.topic.c_str(), stateMsg.payload.c_str());
-
-        wakeDisplay(WAKE_ON_PACKET_MS);
-        display.clear();
-        display.setFont(ArialMT_Plain_10);
-        display.drawString(0, 0, "Fwd: " + String(stateMsg.topic.c_str()));
-        display.drawStringMaxWidth(0, 15, 128, String(stateMsg.payload.c_str()));
-        drawFooter();
-        display.display();
-
-    } else {
-        // Malformed/truncated JSON, or a payload that failed strict field
-        // validation: forward the raw bytes to the base topic rather than
-        // dropping the packet or crashing.
-        Serial.print("RX (Raw, parse error): ");
-        Serial.println(raw_data);
-        client.publish(mqtt_topic, raw_data.c_str());
-    }
+    publishGatewayStatus();
   }
 }
