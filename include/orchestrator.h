@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <deque>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -22,6 +23,11 @@ struct QueuedMessage {
     std::string topic;
     std::string payload;
     bool retain = false;
+    // Non-empty when this message is one of a node's auto-discovery configs;
+    // used to track discovery completion (see pendingDiscoveryCount_) so a
+    // node is only marked discovered once every one of its discovery
+    // messages has actually reached MQTT, not merely been enqueued.
+    std::string discoveryNodeId;
 };
 
 class GatewayOrchestrator {
@@ -73,7 +79,9 @@ private:
     void attemptMqttReconnect();
     void flushQueue();
     void ingestLoRaPacket();
-    void enqueueOrPublish(const MqttMessage& msg, bool retain);
+    void enqueueOrPublish(const MqttMessage& msg, bool retain, const std::string& discoveryNodeId = "");
+    void onMessagePublished(const std::string& discoveryNodeId);
+    void onMessageDropped(const std::string& discoveryNodeId);
     GatewayIdentity identity() const;
 
     IWifiRadio& wifi_;
@@ -91,6 +99,11 @@ private:
     AllowList allowList_;
     std::set<std::string> pendingNodes_;
     std::set<std::string> discoveredNodes_;
+    // Node id -> number of its discovery messages not yet confirmed
+    // published. Absent from both this map and discoveredNodes_ means
+    // discovery has never been attempted (or was abandoned after an
+    // eviction) and should be retried on the node's next packet.
+    std::map<std::string, size_t> pendingDiscoveryCount_;
 
     std::deque<QueuedMessage> outboundQueue_;
 

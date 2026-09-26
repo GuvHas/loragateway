@@ -204,7 +204,7 @@ static void test_queue_overrun_drops_oldest_and_counts_dropped(void) {
     wifi.connected_ = true;
     FakeLoRa loRa;
     FakeMqtt mqtt;
-    mqtt.connectShouldSucceed = false; // stays offline for the whole test
+    mqtt.connected_ = true; // start online so this node's discovery completes
     FakeStore store("kitchen");
     FakeDisplay display;
     FakeClock clock;
@@ -213,14 +213,18 @@ static void test_queue_overrun_drops_oldest_and_counts_dropped(void) {
                                                "LoRaGateway", "lora/incoming");
     orchestrator.begin();
 
-    // First packet from "kitchen": 8 discovery messages + 1 state message queued.
+    // First packet while online: discovery completes immediately, nothing queued.
     loRa.push(kKitchenSuccessPayload);
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(9, orchestrator.queuedMessageCount());
-    TEST_ASSERT_EQUAL_UINT32(0, orchestrator.droppedMessageCount());
+    TEST_ASSERT_EQUAL_UINT32(0, orchestrator.queuedMessageCount());
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
 
-    // 25 more packets from the same (already-discovered) node: each adds
-    // exactly one more state message to the queue, well past the 20 cap.
+    // Now the broker goes away. This node is already fully discovered, so
+    // its further packets each queue only their one state message -- this
+    // test is purely about FIFO/drop-oldest queue mechanics, not discovery.
+    mqtt.connected_ = false;
+    mqtt.connectShouldSucceed = false;
+
     for (int i = 0; i < 25; ++i) {
         loRa.push(kKitchenSuccessPayload);
         orchestrator.tick();
@@ -228,16 +232,68 @@ static void test_queue_overrun_drops_oldest_and_counts_dropped(void) {
 
     TEST_ASSERT_EQUAL_UINT32(gateway::GatewayOrchestrator::kMaxQueuedMessages,
                               orchestrator.queuedMessageCount());
-    // 34 messages were ever enqueued (9 + 25); only 20 fit, so 14 were dropped.
-    TEST_ASSERT_EQUAL_UINT32(14, orchestrator.droppedMessageCount());
+    // 25 messages were enqueued while offline; only 20 fit, so 5 were dropped.
+    TEST_ASSERT_EQUAL_UINT32(25 - gateway::GatewayOrchestrator::kMaxQueuedMessages,
+                              orchestrator.droppedMessageCount());
 
-    // The oldest entries (the discovery configs) must have been evicted;
-    // only the most recent sensor-state messages should remain.
     for (const auto& msg : orchestrator.pendingQueue()) {
         TEST_ASSERT_EQUAL_STRING("lora/incoming/kitchen", msg.topic.c_str());
     }
 
-    TEST_ASSERT_EQUAL_UINT32(0, mqtt.published.size()); // never came online
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // unchanged since going offline
+}
+
+// A discovery message evicted from the queue before ever reaching MQTT must
+// not leave its node permanently un-discovered: the node's next packet
+// should re-enqueue a fresh set of discovery messages instead of Home
+// Assistant silently missing that node's entities forever.
+static void test_evicted_discovery_is_regenerated_on_next_packet(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connectShouldSucceed = false; // stays offline for the whole test
+    FakeStore store("kitchen,garage");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    // Kitchen's 8 discovery messages + 1 state message get queued but never
+    // delivered (still offline).
+    loRa.push(kKitchenSuccessPayload);
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(9, orchestrator.queuedMessageCount());
+
+    // Flood with unrelated "garage" traffic -- never another kitchen packet
+    // -- until every one of kitchen's original queued messages has been
+    // evicted by the 20-message cap.
+    const char* garagePayload =
+        R"({"id":"garage","t":18.0,"h":50.0,"v":4.0,"boot":1,"seq":1,"lb":0,"err":"none"})";
+    for (int i = 0; i < 40; ++i) {
+        loRa.push(garagePayload);
+        orchestrator.tick();
+    }
+
+    for (const auto& msg : orchestrator.pendingQueue()) {
+        TEST_ASSERT_TRUE(msg.topic.find("kitchen") == std::string::npos);
+    }
+
+    // Kitchen's next packet must re-trigger discovery from scratch.
+    loRa.push(kKitchenSuccessPayload);
+    orchestrator.tick();
+
+    bool sawFreshKitchenDiscovery = false;
+    for (const auto& msg : orchestrator.pendingQueue()) {
+        if (msg.topic.find("homeassistant/") != std::string::npos &&
+            msg.topic.find("lora_kitchen") != std::string::npos) {
+            sawFreshKitchenDiscovery = true;
+            break;
+        }
+    }
+    TEST_ASSERT_TRUE(sawFreshKitchenDiscovery);
 }
 
 // ---------------------------------------------------------------------
@@ -318,6 +374,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_malformed_packet_is_queued_to_base_topic_when_offline);
 
     RUN_TEST(test_queue_overrun_drops_oldest_and_counts_dropped);
+    RUN_TEST(test_evicted_discovery_is_regenerated_on_next_packet);
 
     RUN_TEST(test_wifi_down_defers_mqtt_but_still_queues_packets);
     RUN_TEST(test_wifi_reconnect_backoff_then_mqtt_follows);

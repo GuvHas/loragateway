@@ -29,6 +29,7 @@ void GatewayOrchestrator::setIdentity(const std::string& deviceName, const std::
 
 void GatewayOrchestrator::clearDiscoveredNodes() {
     discoveredNodes_.clear();
+    pendingDiscoveryCount_.clear();
 }
 
 bool GatewayOrchestrator::approveNode(const std::string& id) {
@@ -42,6 +43,7 @@ bool GatewayOrchestrator::removeNode(const std::string& id) {
     if (!allowList_.remove(id)) return false;
     store_.saveAllowListCsv(allowList_.toCsv());
     discoveredNodes_.erase(id);
+    pendingDiscoveryCount_.erase(id);
     return true;
 }
 
@@ -96,23 +98,46 @@ void GatewayOrchestrator::attemptMqttReconnect() {
 
 void GatewayOrchestrator::flushQueue() {
     while (!outboundQueue_.empty()) {
-        const QueuedMessage& front = outboundQueue_.front();
+        const QueuedMessage front = outboundQueue_.front();
         if (!mqtt_.publish(front.topic, front.payload, front.retain)) {
             break; // leave the rest queued, retry next tick
         }
         outboundQueue_.pop_front();
+        onMessagePublished(front.discoveryNodeId);
     }
 }
 
-void GatewayOrchestrator::enqueueOrPublish(const MqttMessage& msg, bool retain) {
+void GatewayOrchestrator::enqueueOrPublish(const MqttMessage& msg, bool retain,
+                                            const std::string& discoveryNodeId) {
     if (mqtt_.connected() && mqtt_.publish(msg.topic, msg.payload, retain)) {
+        onMessagePublished(discoveryNodeId);
         return;
     }
-    outboundQueue_.push_back(QueuedMessage{msg.topic, msg.payload, retain});
+    outboundQueue_.push_back(QueuedMessage{msg.topic, msg.payload, retain, discoveryNodeId});
     while (outboundQueue_.size() > kMaxQueuedMessages) {
+        onMessageDropped(outboundQueue_.front().discoveryNodeId);
         outboundQueue_.pop_front(); // drop oldest to make room for the newest
         droppedMessages_++;
     }
+}
+
+void GatewayOrchestrator::onMessagePublished(const std::string& discoveryNodeId) {
+    if (discoveryNodeId.empty()) return;
+    auto it = pendingDiscoveryCount_.find(discoveryNodeId);
+    if (it == pendingDiscoveryCount_.end()) return;
+    if (--(it->second) == 0) {
+        discoveredNodes_.insert(discoveryNodeId);
+        pendingDiscoveryCount_.erase(it);
+    }
+}
+
+void GatewayOrchestrator::onMessageDropped(const std::string& discoveryNodeId) {
+    if (discoveryNodeId.empty()) return;
+    // Any one of a node's discovery messages being evicted means Home
+    // Assistant will never see the complete set; abandon the attempt so the
+    // node's next packet retries discovery from scratch instead of being
+    // marked discovered without ever actually delivering all the configs.
+    pendingDiscoveryCount_.erase(discoveryNodeId);
 }
 
 void GatewayOrchestrator::ingestLoRaPacket() {
@@ -139,11 +164,13 @@ void GatewayOrchestrator::ingestLoRaPacket() {
         return;
     }
 
-    if (discoveredNodes_.find(reading.id) == discoveredNodes_.end()) {
-        for (const auto& msg : buildAutoDiscoveryMessages(reading.id, identity())) {
-            enqueueOrPublish(msg, true);
+    bool discoveryInFlight = pendingDiscoveryCount_.find(reading.id) != pendingDiscoveryCount_.end();
+    if (discoveredNodes_.find(reading.id) == discoveredNodes_.end() && !discoveryInFlight) {
+        auto discoveryMsgs = buildAutoDiscoveryMessages(reading.id, identity());
+        pendingDiscoveryCount_[reading.id] = discoveryMsgs.size();
+        for (const auto& msg : discoveryMsgs) {
+            enqueueOrPublish(msg, true, reading.id);
         }
-        discoveredNodes_.insert(reading.id);
     }
 
     MqttMessage stateMsg = buildSensorStateMessage(reading, packet.rssi, route.topic);

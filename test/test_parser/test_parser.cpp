@@ -128,9 +128,31 @@ static void test_parse_negative_boot_is_rejected(void) {
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ParseError::WrongType), static_cast<int>(result.error));
 }
 
+static void test_parse_fractional_boot_is_rejected(void) {
+    // boot/seq are contractually non-negative integers; a fractional value
+    // must not be silently truncated (e.g. 1.5 -> 1).
+    ParseResult result = parseSensorPayload(std::string(R"({"id":"n1","boot":1.5})"));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ParseError::WrongType), static_cast<int>(result.error));
+}
+
+static void test_parse_boot_overflow_is_rejected(void) {
+    ParseResult result = parseSensorPayload(std::string(R"({"id":"n1","boot":1e20})"));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ParseError::WrongType), static_cast<int>(result.error));
+}
+
 static void test_parse_lb_out_of_range_is_rejected(void) {
     ParseResult result = parseSensorPayload(std::string(R"({"id":"n1","lb":5})"));
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ParseError::WrongType), static_cast<int>(result.error));
+}
+
+static void test_parse_lb_fractional_is_rejected(void) {
+    // as<int>() would truncate 0.5 -> 0 and 1.9 -> 1, silently accepting an
+    // out-of-contract value as if it were a valid boolean flag.
+    ParseResult result = parseSensorPayload(std::string(R"({"id":"n1","lb":0.5})"));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ParseError::WrongType), static_cast<int>(result.error));
+
+    ParseResult result2 = parseSensorPayload(std::string(R"({"id":"n1","lb":1.9})"));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ParseError::WrongType), static_cast<int>(result2.error));
 }
 
 static void test_parse_lb_accepts_json_bool(void) {
@@ -189,6 +211,28 @@ static void test_adversarial_id_is_topic_safe_but_still_needs_html_escaping(void
 
     std::string renderedInHtml = htmlEscape(result.reading.id);
     TEST_ASSERT_TRUE(renderedInHtml.find("<script>") == std::string::npos);
+}
+
+static void test_url_encode_component_escapes_reserved_characters(void) {
+    // sanitizeMqttTopicSegment doesn't strip '&', '=', ' ', etc., since none
+    // of those are MQTT-unsafe -- but they ARE query-string-unsafe, so a
+    // node id containing them must still be percent-encoded before being
+    // placed in an href's query string.
+    TEST_ASSERT_EQUAL_STRING("a%26b", urlEncodeComponent("a&b").c_str());
+    TEST_ASSERT_EQUAL_STRING("a%3Db", urlEncodeComponent("a=b").c_str());
+    TEST_ASSERT_EQUAL_STRING("a%20b", urlEncodeComponent("a b").c_str());
+    TEST_ASSERT_EQUAL_STRING("abc-_.~123", urlEncodeComponent("abc-_.~123").c_str());
+}
+
+static void test_url_encoding_survives_html_escaping_round_trip(void) {
+    // The bug this guards against: htmlEscape("a&b") -> "a&amp;b", which a
+    // browser decodes straight back to "a&b" before parsing the query
+    // string, so /approve?id=a&amp;b is requested as /approve?id=a&b and
+    // only "a" reaches the server. URL-encoding first closes that gap.
+    std::string raw = "a&b";
+    std::string hrefValue = htmlEscape(urlEncodeComponent(raw));
+    TEST_ASSERT_TRUE(hrefValue.find('&') == std::string::npos);
+    TEST_ASSERT_EQUAL_STRING("a%26b", hrefValue.c_str());
 }
 
 // ---------------------------------------------------------------------
@@ -352,7 +396,10 @@ int main(int argc, char** argv) {
     RUN_TEST(test_parse_humidity_wrong_type_is_rejected);
     RUN_TEST(test_parse_boot_wrong_type_is_rejected);
     RUN_TEST(test_parse_negative_boot_is_rejected);
+    RUN_TEST(test_parse_fractional_boot_is_rejected);
+    RUN_TEST(test_parse_boot_overflow_is_rejected);
     RUN_TEST(test_parse_lb_out_of_range_is_rejected);
+    RUN_TEST(test_parse_lb_fractional_is_rejected);
     RUN_TEST(test_parse_lb_accepts_json_bool);
     RUN_TEST(test_parse_err_wrong_type_is_rejected);
     RUN_TEST(test_parse_unknown_err_value_is_forwarded_not_rejected);
@@ -362,6 +409,8 @@ int main(int argc, char** argv) {
     RUN_TEST(test_sanitize_mqtt_topic_segment_strips_control_characters);
     RUN_TEST(test_html_escape_neutralizes_script_tag);
     RUN_TEST(test_adversarial_id_is_topic_safe_but_still_needs_html_escaping);
+    RUN_TEST(test_url_encode_component_escapes_reserved_characters);
+    RUN_TEST(test_url_encoding_survives_html_escaping_round_trip);
 
     RUN_TEST(test_allowlist_parses_csv_and_checks_case_insensitively);
     RUN_TEST(test_allowlist_empty_csv_allows_nothing);

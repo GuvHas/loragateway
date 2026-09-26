@@ -83,6 +83,15 @@ std::string sanitizeMqttTopicSegment(const std::string& raw, size_t maxLen = 40)
 // device-management web page, even though ids are already topic-sanitized.
 std::string htmlEscape(const std::string& raw);
 
+// Percent-encodes a string for safe use as a URL query-parameter value
+// (RFC 3986 unreserved characters pass through unescaped; everything else
+// becomes %XX). Needed in addition to htmlEscape() wherever a node id is
+// placed inside an href's query string: HTML-entity-encoding alone (e.g.
+// "&" -> "&amp;") is decoded back to "&" by the browser before the URL is
+// parsed, so a raw "&" in a node id would still split the query string and
+// let /approve or /remove act on the wrong id.
+std::string urlEncodeComponent(const std::string& raw);
+
 // ---------------------------------------------------------------------
 // Allowlist (replaces the inline CSV string scanning in main.cpp)
 // ---------------------------------------------------------------------

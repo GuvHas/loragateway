@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <limits>
 
 namespace gateway {
 
@@ -51,7 +53,12 @@ bool tryReadOptionalFloat(JsonVariantConst v, std::optional<float>& out) {
 bool tryReadNonNegativeInt(JsonVariantConst v, uint32_t& out) {
     if (!isNumericVariant(v)) return false;
     double d = v.as<double>();
-    if (d < 0) return false;
+    // Reject non-finite, fractional (e.g. 1.5), and out-of-range values
+    // instead of silently truncating/UB-casting them: boot/seq are
+    // contractually non-negative integers, not "whatever fits after a cast".
+    if (!std::isfinite(d)) return false;
+    if (d != std::floor(d)) return false;
+    if (d < 0 || d > static_cast<double>(std::numeric_limits<uint32_t>::max())) return false;
     out = static_cast<uint32_t>(d);
     return true;
 }
@@ -110,6 +117,24 @@ std::string htmlEscape(const std::string& raw) {
             case '"': out += "&quot;"; break;
             case '\'': out += "&#39;"; break;
             default: out += c; break;
+        }
+    }
+    return out;
+}
+
+std::string urlEncodeComponent(const std::string& raw) {
+    static const char* hex = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(raw.size());
+    for (unsigned char c : raw) {
+        bool isUnreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                             (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~';
+        if (isUnreserved) {
+            out += static_cast<char>(c);
+        } else {
+            out += '%';
+            out += hex[(c >> 4) & 0xF];
+            out += hex[c & 0xF];
         }
     }
     return out;
@@ -181,12 +206,14 @@ ParseResult parseSensorPayload(const char* json, size_t length) {
         if (lbVar.is<bool>()) {
             reading.lowBattery = lbVar.as<bool>();
         } else if (isNumericVariant(lbVar)) {
-            int v = lbVar.as<int>();
-            if (v != 0 && v != 1) {
+            // Compare the exact value, not as<int>()'s truncation: 0.5 or 1.9
+            // must be rejected, not silently coerced into a valid 0/1.
+            double v = lbVar.as<double>();
+            if (v != 0.0 && v != 1.0) {
                 result.error = ParseError::WrongType;
                 return result;
             }
-            reading.lowBattery = (v == 1);
+            reading.lowBattery = (v == 1.0);
         } else {
             result.error = ParseError::WrongType;
             return result;

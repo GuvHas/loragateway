@@ -201,17 +201,22 @@ void handleDevicesPage() {
   html += "<h1>Device Management</h1>";
 
   // --- Pending (unapproved) nodes ---
-  // Node ids come from unauthenticated LoRa packets, so they are escaped
-  // before being embedded in HTML (see gateway::htmlEscape / test_parser).
+  // Node ids come from unauthenticated LoRa packets. Display text is
+  // HTML-escaped (gateway::htmlEscape); href query values additionally need
+  // URL-encoding first (gateway::urlEncodeComponent) since a raw '&' would
+  // survive HTML-escaping (-> "&amp;") only for the browser to decode it
+  // straight back to '&' and split the query string, misrouting the
+  // approve/remove action to the wrong id. See test_parser for both.
   html += "<h2>Pending Devices</h2>";
   auto pendingIds = orchestrator.pendingNodeIds();
   if (pendingIds.empty()) {
     html += "<div class='none'>No new devices detected yet.</div>";
   } else {
     for (const auto& id : pendingIds) {
-      String escaped = String(gateway::htmlEscape(id).c_str());
-      html += "<div class='dev'><span class='name'>" + escaped + "</span>";
-      html += "<a class='btn approve' href='/approve?id=" + escaped + "'>Approve</a></div>";
+      String name = String(gateway::htmlEscape(id).c_str());
+      String href = String(gateway::htmlEscape(gateway::urlEncodeComponent(id)).c_str());
+      html += "<div class='dev'><span class='name'>" + name + "</span>";
+      html += "<a class='btn approve' href='/approve?id=" + href + "'>Approve</a></div>";
     }
   }
 
@@ -221,9 +226,10 @@ void handleDevicesPage() {
     html += "<div class='none'>No approved devices.</div>";
   } else {
     for (const auto& entry : orchestrator.allowList().entries()) {
-      String escaped = String(gateway::htmlEscape(entry).c_str());
-      html += "<div class='dev'><span class='name'>" + escaped + "</span>";
-      html += "<a class='btn remove' href='/remove?id=" + escaped + "'>Remove</a></div>";
+      String name = String(gateway::htmlEscape(entry).c_str());
+      String href = String(gateway::htmlEscape(gateway::urlEncodeComponent(entry)).c_str());
+      html += "<div class='dev'><span class='name'>" + name + "</span>";
+      html += "<a class='btn remove' href='/remove?id=" + href + "'>Remove</a></div>";
     }
   }
 
