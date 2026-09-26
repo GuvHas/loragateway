@@ -11,7 +11,7 @@ namespace {
 
 constexpr size_t kSensorJsonCapacity = 512;
 constexpr size_t kDiscoveryJsonCapacity = 600;
-constexpr size_t kStatusJsonCapacity = 320;
+constexpr size_t kStatusJsonCapacity = 384;
 
 std::string trim(const std::string& s) {
     size_t start = 0;
@@ -407,6 +407,9 @@ std::vector<MqttMessage> buildGatewayDiscoveryMessages(const GatewayIdentity& ga
     messages.push_back(buildGwSensor("wifi", "WiFi Signal", "{{ value_json.wifi_rssi }}", "dBm", "signal_strength"));
     messages.push_back(buildGwSensor("heap", "Free Memory", "{{ value_json.free_heap }}", "B", ""));
     messages.push_back(buildGwSensor("pkts", "Packets Received", "{{ value_json.packets_rx }}", "pkts", ""));
+    messages.push_back(buildGwSensor("queue", "Queue Depth", "{{ value_json.queue_depth }}", "msgs", ""));
+    messages.push_back(
+        buildGwSensor("dropped", "Packets Dropped", "{{ value_json.packets_dropped }}", "msgs", ""));
     return messages;
 }
 
@@ -420,6 +423,8 @@ MqttMessage buildGatewayStatusMessage(const GatewayIdentity& gateway, const Gate
     doc["enablecrc"] = true;
     doc["invertiq"] = false;
     doc["onlyknown"] = stats.onlyKnownNodes;
+    doc["queue_depth"] = stats.queueDepth;
+    doc["packets_dropped"] = stats.packetsDropped;
 
     MqttMessage msg;
     msg.topic = gateway.baseTopic + "/gateway/state";

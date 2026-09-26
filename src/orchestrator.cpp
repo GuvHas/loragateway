@@ -2,17 +2,21 @@
 
 namespace gateway {
 
-GatewayOrchestrator::GatewayOrchestrator(ILoRaReceiver& loRa, IMqttClient& mqtt, INodeStore& store,
-                                          IDisplay& display, IClock& clock, std::string deviceName,
-                                          std::string baseTopic, unsigned long reconnectBackoffMs)
-    : loRa_(loRa),
+GatewayOrchestrator::GatewayOrchestrator(IWifiRadio& wifi, ILoRaReceiver& loRa, IMqttClient& mqtt,
+                                          INodeStore& store, IDisplay& display, IClock& clock,
+                                          std::string deviceName, std::string baseTopic,
+                                          unsigned long mqttReconnectBackoffMs,
+                                          unsigned long wifiReconnectBackoffMs)
+    : wifi_(wifi),
+      loRa_(loRa),
       mqtt_(mqtt),
       store_(store),
       display_(display),
       clock_(clock),
       deviceName_(std::move(deviceName)),
       baseTopic_(std::move(baseTopic)),
-      reconnectBackoffMs_(reconnectBackoffMs) {}
+      mqttReconnectBackoffMs_(mqttReconnectBackoffMs),
+      wifiReconnectBackoffMs_(wifiReconnectBackoffMs) {}
 
 void GatewayOrchestrator::begin() {
     allowList_ = AllowList(store_.loadAllowListCsv());
@@ -49,25 +53,39 @@ GatewayIdentity GatewayOrchestrator::identity() const {
     return GatewayIdentity{deviceName_, baseTopic_};
 }
 
-void GatewayOrchestrator::tick(bool wifiConnected) {
-    if (wifiConnected) {
+void GatewayOrchestrator::tick() {
+    if (wifi_.connected()) {
         if (mqtt_.connected()) {
             mqtt_.loop();
             flushQueue();
         } else {
-            attemptReconnect();
+            attemptMqttReconnect();
         }
+    } else {
+        attemptWifiReconnect();
     }
     ingestLoRaPacket();
 }
 
-void GatewayOrchestrator::attemptReconnect() {
+void GatewayOrchestrator::attemptWifiReconnect() {
     unsigned long now = clock_.millis();
-    if (hasAttemptedReconnect_ && (now - lastReconnectAttemptMs_) < reconnectBackoffMs_) {
+    if (hasAttemptedWifiReconnect_ && (now - lastWifiReconnectAttemptMs_) < wifiReconnectBackoffMs_) {
         return;
     }
-    hasAttemptedReconnect_ = true;
-    lastReconnectAttemptMs_ = now;
+    hasAttemptedWifiReconnect_ = true;
+    lastWifiReconnectAttemptMs_ = now;
+
+    display_.showLines({"WiFi Reconnecting..."});
+    wifi_.reconnect(); // non-blocking; connected() reflects the outcome on a later tick()
+}
+
+void GatewayOrchestrator::attemptMqttReconnect() {
+    unsigned long now = clock_.millis();
+    if (hasAttemptedMqttReconnect_ && (now - lastMqttReconnectAttemptMs_) < mqttReconnectBackoffMs_) {
+        return;
+    }
+    hasAttemptedMqttReconnect_ = true;
+    lastMqttReconnectAttemptMs_ = now;
 
     display_.showLines({"MQTT Reconnecting..."});
     if (mqtt_.connect()) {
@@ -93,6 +111,7 @@ void GatewayOrchestrator::enqueueOrPublish(const MqttMessage& msg, bool retain) 
     outboundQueue_.push_back(QueuedMessage{msg.topic, msg.payload, retain});
     while (outboundQueue_.size() > kMaxQueuedMessages) {
         outboundQueue_.pop_front(); // drop oldest to make room for the newest
+        droppedMessages_++;
     }
 }
 

@@ -148,6 +148,12 @@ struct GatewayStats {
     unsigned long packetsReceived = 0;
     std::string ipAddress;
     bool onlyKnownNodes = false;
+    // Store-and-forward queue health (GatewayOrchestrator, Phase 2): how many
+    // messages are currently held because MQTT was unreachable, and how many
+    // have been permanently dropped because the queue filled up while still
+    // offline (see GatewayOrchestrator::kMaxQueuedMessages).
+    uint32_t queueDepth = 0;
+    unsigned long packetsDropped = 0;
 };
 
 std::string availabilityTopic(const std::string& baseTopic);
@@ -165,7 +171,8 @@ std::vector<MqttMessage> buildAutoDiscoveryMessages(const std::string& nodeId,
                                                      const GatewayIdentity& gateway);
 
 // Home Assistant MQTT-discovery configs for the gateway's own diagnostic
-// sensors (WiFi signal, free heap, packet count).
+// sensors (WiFi signal, free heap, packet count, store-and-forward queue
+// depth, dropped-message count).
 std::vector<MqttMessage> buildGatewayDiscoveryMessages(const GatewayIdentity& gateway);
 
 // Gateway self-status state message published periodically.

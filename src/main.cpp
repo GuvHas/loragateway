@@ -32,6 +32,7 @@
 #define LOGO_DISPLAY_MS        5000
 #define SCREEN_TIMEOUT_MS      30000
 #define MQTT_RECONNECT_MS      5000
+#define WIFI_RECONNECT_MS      10000
 #define WAKE_ON_SAVE_MS        10000
 #define WAKE_ON_PACKET_MS      5000
 #define STATUS_PUBLISH_MS      60000
@@ -141,17 +142,19 @@ Preferences preferences;
 WiFiManager wm;
 
 // Hardware Abstraction Layer adapters (include/hal_esp32.h) and the
-// orchestrator that owns all LoRa/MQTT/allowlist business logic
+// orchestrator that owns all WiFi/LoRa/MQTT/allowlist business logic
 // (include/orchestrator.h, unit-tested natively in test/test_orchestrator).
+gateway::Esp32WifiRadio wifiRadio;
 gateway::Esp32LoRaReceiver loRaReceiver;
 gateway::Esp32MqttClient mqttAdapter(client);
 gateway::Esp32NodeStore nodeStore(preferences);
 gateway::Esp32Display esp32Display(display, []() { wakeDisplay(WAKE_ON_PACKET_MS); });
 gateway::Esp32Clock esp32Clock;
 
-gateway::GatewayOrchestrator orchestrator(loRaReceiver, mqttAdapter, nodeStore, esp32Display,
-                                           esp32Clock, std::string(device_name),
-                                           std::string(mqtt_topic), MQTT_RECONNECT_MS);
+gateway::GatewayOrchestrator orchestrator(wifiRadio, loRaReceiver, mqttAdapter, nodeStore,
+                                           esp32Display, esp32Clock, std::string(device_name),
+                                           std::string(mqtt_topic), MQTT_RECONNECT_MS,
+                                           WIFI_RECONNECT_MS);
 
 // WiFiManager Parameters
 WiFiManagerParameter custom_device_name("devname", "Device Name", "LoRaGateway", FIELD_LEN);
@@ -288,6 +291,8 @@ void publishGatewayStatus() {
   stats.packetsReceived = orchestrator.packetsReceived();
   stats.ipAddress = WiFi.localIP().toString().c_str();
   stats.onlyKnownNodes = !orchestrator.allowList().entries().empty();
+  stats.queueDepth = orchestrator.queuedMessageCount();
+  stats.packetsDropped = orchestrator.droppedMessageCount();
 
   gateway::MqttMessage msg = gateway::buildGatewayStatusMessage(currentGatewayIdentity(), stats);
   mqttAdapter.publish(msg.topic, msg.payload, true);
@@ -481,16 +486,15 @@ void loop() {
     }
   }
 
-  bool wifiConnected = (WiFi.status() == WL_CONNECTED);
+  // WiFi reconnect (with backoff), LoRa ingestion, allowlist/routing
+  // decisions, sensor-state and discovery publishing, the store-and-forward
+  // queue, and MQTT connect/backoff all live in the orchestrator
+  // (include/orchestrator.h), unit-tested natively in test/test_orchestrator.
+  orchestrator.tick();
 
-  // All LoRa ingestion, allowlist/routing decisions, sensor-state and
-  // discovery publishing, the store-and-forward queue, and MQTT
-  // connect/backoff live in the orchestrator (include/orchestrator.h),
-  // unit-tested natively in test/test_orchestrator.
-  orchestrator.tick(wifiConnected);
-
-  if (wifiConnected && mqttAdapter.connected() &&
-      (millis() - lastStatusPublish > STATUS_PUBLISH_MS)) {
+  // mqttAdapter.connected() alone is a sufficient gate here: MQTT can't be
+  // connected without WiFi also being up.
+  if (mqttAdapter.connected() && (millis() - lastStatusPublish > STATUS_PUBLISH_MS)) {
     lastStatusPublish = millis();
     static bool gatewayDiscoverySent = false;
     if (!gatewayDiscoverySent) {

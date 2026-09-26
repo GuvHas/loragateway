@@ -16,6 +16,17 @@ struct RawPacket {
     int rssi = 0;
 };
 
+class IWifiRadio {
+public:
+    virtual ~IWifiRadio() = default;
+
+    virtual bool connected() = 0;
+
+    // Requests a reconnect attempt. Does not block waiting for the result;
+    // connected() reflects success (or continued failure) on a later call.
+    virtual void reconnect() = 0;
+};
+
 class ILoRaReceiver {
 public:
     virtual ~ILoRaReceiver() = default;

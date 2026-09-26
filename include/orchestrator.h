@@ -5,7 +5,7 @@
 // "a LoRa packet came in, what do we do about it", and is driven entirely
 // through interfaces so it can be unit tested natively with fakes (see
 // test/test_orchestrator). It never touches Arduino, LoRa, PubSubClient,
-// Preferences, or a display directly.
+// Preferences, WiFi, or a display directly.
 
 #include <cstddef>
 #include <deque>
@@ -28,24 +28,27 @@ class GatewayOrchestrator {
 public:
     // Bound on the store-and-forward queue used while MQTT is unreachable.
     // Beyond this, the oldest queued message is dropped to make room for
-    // the newest one (see enqueueOrPublish()).
+    // the newest one (see enqueueOrPublish()), and droppedMessageCount()
+    // increments.
     static constexpr size_t kMaxQueuedMessages = 20;
-    static constexpr unsigned long kDefaultReconnectBackoffMs = 5000;
+    static constexpr unsigned long kDefaultMqttReconnectBackoffMs = 5000;
+    static constexpr unsigned long kDefaultWifiReconnectBackoffMs = 10000;
 
-    GatewayOrchestrator(ILoRaReceiver& loRa, IMqttClient& mqtt, INodeStore& store,
+    GatewayOrchestrator(IWifiRadio& wifi, ILoRaReceiver& loRa, IMqttClient& mqtt, INodeStore& store,
                         IDisplay& display, IClock& clock, std::string deviceName,
                         std::string baseTopic,
-                        unsigned long reconnectBackoffMs = kDefaultReconnectBackoffMs);
+                        unsigned long mqttReconnectBackoffMs = kDefaultMqttReconnectBackoffMs,
+                        unsigned long wifiReconnectBackoffMs = kDefaultWifiReconnectBackoffMs);
 
     // Loads the persisted allowlist from `store`. Call once during setup,
     // after the store itself is ready to be read from.
     void begin();
 
-    // Drives one iteration. MQTT connection housekeeping (loop()/reconnect)
-    // only runs when `wifiConnected` is true, since attempting an MQTT
-    // connect without a network is pointless; LoRa packet ingestion always
-    // runs, so packets are captured (and queued) even while offline.
-    void tick(bool wifiConnected);
+    // Drives one iteration: WiFi connection housekeeping (reconnect with
+    // backoff when down), MQTT connection housekeeping (loop()/reconnect,
+    // only attempted while WiFi is up), and LoRa packet ingestion (always,
+    // so packets are captured — and queued — even while fully offline).
+    void tick();
 
     void setIdentity(const std::string& deviceName, const std::string& baseTopic);
     void clearDiscoveredNodes();
@@ -61,13 +64,19 @@ public:
     size_t queuedMessageCount() const { return outboundQueue_.size(); }
     const std::deque<QueuedMessage>& pendingQueue() const { return outboundQueue_; }
 
+    // Messages permanently discarded because the store-and-forward queue
+    // was already at kMaxQueuedMessages when a new one needed to be queued.
+    unsigned long droppedMessageCount() const { return droppedMessages_; }
+
 private:
-    void attemptReconnect();
+    void attemptWifiReconnect();
+    void attemptMqttReconnect();
     void flushQueue();
     void ingestLoRaPacket();
     void enqueueOrPublish(const MqttMessage& msg, bool retain);
     GatewayIdentity identity() const;
 
+    IWifiRadio& wifi_;
     ILoRaReceiver& loRa_;
     IMqttClient& mqtt_;
     INodeStore& store_;
@@ -76,7 +85,8 @@ private:
 
     std::string deviceName_;
     std::string baseTopic_;
-    unsigned long reconnectBackoffMs_;
+    unsigned long mqttReconnectBackoffMs_;
+    unsigned long wifiReconnectBackoffMs_;
 
     AllowList allowList_;
     std::set<std::string> pendingNodes_;
@@ -85,8 +95,13 @@ private:
     std::deque<QueuedMessage> outboundQueue_;
 
     unsigned long packetsReceived_ = 0;
-    bool hasAttemptedReconnect_ = false;
-    unsigned long lastReconnectAttemptMs_ = 0;
+    unsigned long droppedMessages_ = 0;
+
+    bool hasAttemptedMqttReconnect_ = false;
+    unsigned long lastMqttReconnectAttemptMs_ = 0;
+
+    bool hasAttemptedWifiReconnect_ = false;
+    unsigned long lastWifiReconnectAttemptMs_ = 0;
 };
 
 } // namespace gateway

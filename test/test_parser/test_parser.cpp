@@ -301,8 +301,11 @@ static void test_build_gateway_discovery_messages_covers_diagnostics(void) {
     GatewayIdentity gateway{"LoRaGateway", "lora/incoming"};
     std::vector<MqttMessage> messages = buildGatewayDiscoveryMessages(gateway);
 
-    TEST_ASSERT_EQUAL_UINT32(3, messages.size());
+    // wifi, heap, packets_rx, queue_depth, packets_dropped.
+    TEST_ASSERT_EQUAL_UINT32(5, messages.size());
     TEST_ASSERT_EQUAL_STRING("homeassistant/sensor/loragateway_wifi/config", messages[0].topic.c_str());
+    TEST_ASSERT_EQUAL_STRING("homeassistant/sensor/loragateway_queue/config", messages[3].topic.c_str());
+    TEST_ASSERT_EQUAL_STRING("homeassistant/sensor/loragateway_dropped/config", messages[4].topic.c_str());
 }
 
 static void test_build_gateway_status_message(void) {
@@ -314,6 +317,8 @@ static void test_build_gateway_status_message(void) {
     stats.packetsReceived = 7;
     stats.ipAddress = "192.168.1.50";
     stats.onlyKnownNodes = true;
+    stats.queueDepth = 3;
+    stats.packetsDropped = 2;
 
     MqttMessage msg = buildGatewayStatusMessage(gateway, stats);
     TEST_ASSERT_EQUAL_STRING("lora/incoming/gateway/state", msg.topic.c_str());
@@ -324,6 +329,8 @@ static void test_build_gateway_status_message(void) {
     TEST_ASSERT_EQUAL_UINT32(42, doc["uptime_s"].as<uint32_t>());
     TEST_ASSERT_EQUAL_STRING("192.168.1.50", doc["ip"].as<const char*>());
     TEST_ASSERT_TRUE(doc["onlyknown"].as<bool>());
+    TEST_ASSERT_EQUAL_UINT32(3, doc["queue_depth"].as<uint32_t>());
+    TEST_ASSERT_EQUAL_UINT32(2, doc["packets_dropped"].as<uint32_t>());
 }
 
 int main(int argc, char** argv) {

@@ -16,6 +16,13 @@
 
 namespace gateway {
 
+// Wraps the ESP32 Arduino core's WiFi station state/reconnect.
+class Esp32WifiRadio : public IWifiRadio {
+public:
+    bool connected() override;
+    void reconnect() override;
+};
+
 // Wraps the global `LoRa` singleton (sandeepmistry/LoRa).
 class Esp32LoRaReceiver : public ILoRaReceiver {
 public:

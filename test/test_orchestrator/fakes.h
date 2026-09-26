@@ -9,6 +9,23 @@
 
 #include "hal.h"
 
+class FakeWifiRadio : public gateway::IWifiRadio {
+public:
+    bool connected() override { return connected_; }
+
+    void reconnect() override {
+        reconnectAttempts++;
+        connected_ = reconnectShouldSucceed;
+    }
+
+    // Test controls
+    bool connected_ = false;
+    bool reconnectShouldSucceed = true;
+
+    // Test observations
+    int reconnectAttempts = 0;
+};
+
 class FakeLoRa : public gateway::ILoRaReceiver {
 public:
     void push(const std::string& data, int rssi = -60) {
