@@ -34,4 +34,7 @@ jobs:
         run: pip install platformio
 
       - name: Build firmware
-        run: pio run
+        run: pio run -e ttgo-lora32-v21
+
+      - name: Run native unit tests
+        run: pio test -e native
