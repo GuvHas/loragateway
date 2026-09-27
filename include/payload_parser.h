@@ -99,9 +99,14 @@ std::string urlEncodeComponent(const std::string& raw);
 // perfectly valid MQTT topic character like '~' or '.' is still illegal in
 // an HA discovery topic and gets silently rejected by HA (logged, not
 // errored back to the gateway) if it isn't also stripped here. Disallowed
-// characters are replaced with '_' rather than dropped, so two different
-// malformed ids don't collide into the same slug and the corruption stays
-// visible instead of disappearing. Used only for the discovery topic/
+// characters are replaced with '_'; if any substitution happened, an 8-hex-
+// character hash of the original bytes is appended so that two different
+// ids which would otherwise collapse to the same slug (e.g. "a.b" and
+// "a~b", or a malformed id colliding with an already-legal "a_b") stay
+// distinguishable instead of one silently overwriting the other's discovery
+// config/uniq_id/device-id in Home Assistant. An already-clean id is
+// returned unchanged (no hash suffix), so existing HA entities for
+// well-formed node names are unaffected. Used only for the discovery topic/
 // uniq_id/device id — NOT for the sensor's actual state topic, which has no
 // such restriction and must keep matching decideRoute()'s topic exactly.
 std::string haSafeSlug(const std::string& raw);

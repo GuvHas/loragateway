@@ -224,15 +224,39 @@ static void test_url_encode_component_escapes_reserved_characters(void) {
     TEST_ASSERT_EQUAL_STRING("abc-_.~123", urlEncodeComponent("abc-_.~123").c_str());
 }
 
-static void test_ha_safe_slug_replaces_illegal_characters(void) {
+static void test_ha_safe_slug_keeps_clean_ids_unchanged(void) {
     // Home Assistant's discovery topic restricts node_id/object_id segments
     // to [a-z0-9_-] -- stricter than plain MQTT topic rules, which allow
-    // '~' (e.g. a corrupted-in-transit reading like "ga~agetemp"). Disallowed
-    // characters become '_', not stripped, so corruption stays visible and
-    // two different bad ids can't collide into the same slug.
-    TEST_ASSERT_EQUAL_STRING("ga_agetemp", haSafeSlug("ga~agetemp").c_str());
+    // '~' (e.g. a corrupted-in-transit reading like "ga~agetemp"). An
+    // already-clean id needs no substitution, so it comes back unchanged --
+    // this keeps existing HA entities for well-formed node names stable.
     TEST_ASSERT_EQUAL_STRING("kitchen", haSafeSlug("Kitchen").c_str());
-    TEST_ASSERT_EQUAL_STRING("a_b_c", haSafeSlug("a.b/c").c_str());
+    TEST_ASSERT_EQUAL_STRING("garage-temp_1", haSafeSlug("garage-temp_1").c_str());
+}
+
+static void test_ha_safe_slug_starts_with_the_substituted_prefix(void) {
+    std::string slug = haSafeSlug("ga~agetemp");
+    TEST_ASSERT_EQUAL_INT(0, strncmp(slug.c_str(), "ga_agetemp_", strlen("ga_agetemp_")));
+}
+
+static void test_ha_safe_slug_disambiguates_illegal_character_collisions(void) {
+    // Naively substituting every disallowed character with '_' would map
+    // "a.b", "a~b" and the already-legal "a_b" all onto the same slug,
+    // letting one node's discovery config silently overwrite another's in
+    // Home Assistant. Any id that actually needed substitution must get a
+    // distinguishing suffix, so none of these three collide.
+    std::string slugClean = haSafeSlug("a_b"); // already legal: unchanged
+    std::string slugDot = haSafeSlug("a.b");
+    std::string slugTilde = haSafeSlug("a~b");
+
+    TEST_ASSERT_EQUAL_STRING("a_b", slugClean.c_str());
+    TEST_ASSERT_TRUE(slugDot != slugClean);
+    TEST_ASSERT_TRUE(slugTilde != slugClean);
+    TEST_ASSERT_TRUE(slugDot != slugTilde);
+
+    // Deterministic: the same input always produces the same slug, so a
+    // node's discovery topic stays stable across reboots/reconnects.
+    TEST_ASSERT_EQUAL_STRING(slugDot.c_str(), haSafeSlug("a.b").c_str());
 }
 
 static void test_url_encoding_survives_html_escaping_round_trip(void) {
@@ -363,6 +387,16 @@ static void test_build_gateway_discovery_messages_covers_diagnostics(void) {
     TEST_ASSERT_EQUAL_STRING("homeassistant/sensor/loragateway_dropped/config", messages[4].topic.c_str());
 }
 
+namespace {
+bool isHaDiscoveryTopicSafe(const std::string& topic) {
+    for (char c : topic) {
+        bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '/';
+        if (!ok) return false;
+    }
+    return true;
+}
+} // namespace
+
 static void test_build_auto_discovery_messages_sanitizes_ha_illegal_characters(void) {
     // Regression test for a real incident: a node id like "ga~agetemp"
     // (e.g. an over-the-air bit error that still passed LoRa's CRC) must not
@@ -372,13 +406,17 @@ static void test_build_auto_discovery_messages_sanitizes_ha_illegal_characters(v
     GatewayIdentity gateway{"LoRaGateway", "lora/incoming"};
     std::vector<MqttMessage> messages = buildAutoDiscoveryMessages("ga~agetemp", gateway);
 
-    TEST_ASSERT_EQUAL_STRING("homeassistant/sensor/lora_ga_agetemp_t/config", messages[0].topic.c_str());
+    for (const auto& msg : messages) {
+        TEST_ASSERT_TRUE(isHaDiscoveryTopicSafe(msg.topic));
+    }
 
     StaticJsonDocument<1024> doc;
     DeserializationError err = deserializeJson(doc, messages[0].payload);
     TEST_ASSERT_FALSE(err);
-    TEST_ASSERT_EQUAL_STRING("lora_ga_agetemp_t", doc["uniq_id"].as<const char*>());
-    TEST_ASSERT_EQUAL_STRING("lora_ga_agetemp", doc["dev"]["ids"].as<const char*>());
+    std::string uniqId = doc["uniq_id"].as<const char*>();
+    std::string devId = doc["dev"]["ids"].as<const char*>();
+    TEST_ASSERT_TRUE(uniqId.find('~') == std::string::npos);
+    TEST_ASSERT_TRUE(devId.find('~') == std::string::npos);
     // The state topic is untouched by this fix: it must keep matching
     // decideRoute()'s actual publish topic, which only guarantees
     // MQTT-safety, not HA's stricter discovery-topic charset.
@@ -391,8 +429,9 @@ static void test_build_gateway_discovery_messages_sanitizes_ha_illegal_character
     GatewayIdentity gateway{"Kitchen's Gateway!", "lora/incoming"};
     std::vector<MqttMessage> messages = buildGatewayDiscoveryMessages(gateway);
 
-    TEST_ASSERT_EQUAL_STRING("homeassistant/sensor/kitchen_s_gateway__wifi/config",
-                              messages[0].topic.c_str());
+    for (const auto& msg : messages) {
+        TEST_ASSERT_TRUE(isHaDiscoveryTopicSafe(msg.topic));
+    }
 }
 
 static void test_build_gateway_status_message(void) {
@@ -453,7 +492,9 @@ int main(int argc, char** argv) {
     RUN_TEST(test_html_escape_neutralizes_script_tag);
     RUN_TEST(test_adversarial_id_is_topic_safe_but_still_needs_html_escaping);
     RUN_TEST(test_url_encode_component_escapes_reserved_characters);
-    RUN_TEST(test_ha_safe_slug_replaces_illegal_characters);
+    RUN_TEST(test_ha_safe_slug_keeps_clean_ids_unchanged);
+    RUN_TEST(test_ha_safe_slug_starts_with_the_substituted_prefix);
+    RUN_TEST(test_ha_safe_slug_disambiguates_illegal_character_collisions);
     RUN_TEST(test_url_encoding_survives_html_escaping_round_trip);
 
     RUN_TEST(test_allowlist_parses_csv_and_checks_case_insensitively);

@@ -140,11 +140,46 @@ std::string urlEncodeComponent(const std::string& raw) {
     return out;
 }
 
+uint32_t fnv1a32(const std::string& data) {
+    uint32_t hash = 2166136261u;
+    for (unsigned char c : data) {
+        hash ^= c;
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+std::string toHex8(uint32_t value) {
+    static const char* hex = "0123456789abcdef";
+    std::string out(8, '0');
+    for (int i = 7; i >= 0; --i) {
+        out[static_cast<size_t>(i)] = hex[value & 0xF];
+        value >>= 4;
+    }
+    return out;
+}
+
 std::string haSafeSlug(const std::string& raw) {
     std::string out = toLower(raw);
+    bool changed = false;
     for (char& c : out) {
         bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
-        if (!ok) c = '_';
+        if (!ok) {
+            c = '_';
+            changed = true;
+        }
+    }
+    if (changed) {
+        // Substituting every disallowed character with '_' is lossy: "a.b",
+        // "a~b" and the already-legal "a_b" would otherwise all collapse to
+        // the same slug, so one node's discovery config could silently
+        // overwrite another's uniq_id/device-id/topic in Home Assistant.
+        // Appending a hash of the *original* bytes makes any id that needed
+        // substitution collision-resistant against every other id, while an
+        // already-clean id (the overwhelmingly common case) keeps its
+        // existing, human-readable, unchanged slug.
+        out += '_';
+        out += toHex8(fnv1a32(raw));
     }
     return out;
 }
