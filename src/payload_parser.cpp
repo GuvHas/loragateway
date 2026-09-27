@@ -140,6 +140,50 @@ std::string urlEncodeComponent(const std::string& raw) {
     return out;
 }
 
+uint32_t fnv1a32(const std::string& data) {
+    uint32_t hash = 2166136261u;
+    for (unsigned char c : data) {
+        hash ^= c;
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+std::string toHex8(uint32_t value) {
+    static const char* hex = "0123456789abcdef";
+    std::string out(8, '0');
+    for (int i = 7; i >= 0; --i) {
+        out[static_cast<size_t>(i)] = hex[value & 0xF];
+        value >>= 4;
+    }
+    return out;
+}
+
+std::string haSafeSlug(const std::string& raw) {
+    std::string out = toLower(raw);
+    bool changed = false;
+    for (char& c : out) {
+        bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
+        if (!ok) {
+            c = '_';
+            changed = true;
+        }
+    }
+    if (changed) {
+        // Substituting every disallowed character with '_' is lossy: "a.b",
+        // "a~b" and the already-legal "a_b" would otherwise all collapse to
+        // the same slug, so one node's discovery config could silently
+        // overwrite another's uniq_id/device-id/topic in Home Assistant.
+        // Appending a hash of the *original* bytes makes any id that needed
+        // substitution collision-resistant against every other id, while an
+        // already-clean id (the overwhelmingly common case) keeps its
+        // existing, human-readable, unchanged slug.
+        out += '_';
+        out += toHex8(fnv1a32(raw));
+    }
+    return out;
+}
+
 // ---------------------------------------------------------------------
 // Payload parsing
 // ---------------------------------------------------------------------
@@ -343,7 +387,15 @@ MqttMessage buildEntityDiscovery(const std::string& component,
                                   const GatewayIdentity& gateway,
                                   const std::string& entCat = "",
                                   int precision = -1) {
+    // stateTopic must exactly match the topic decideRoute() actually
+    // publishes readings to (which only guarantees MQTT-safety, not HA's
+    // stricter discovery-topic charset) -- so it stays on the plain
+    // lowercase id. haId is a *separate*, HA-discovery-safe slug used only
+    // for this message's own topic/uniq_id/device-id, since those must
+    // satisfy HA's [a-z0-9_-] requirement regardless of what the state
+    // topic looks like.
     std::string safeId = toLower(nodeId);
+    std::string haId = haSafeSlug(nodeId);
     std::string stateTopic = gateway.baseTopic + "/" + safeId;
     std::string availTopic = availabilityTopic(gateway.baseTopic);
 
@@ -353,20 +405,20 @@ MqttMessage buildEntityDiscovery(const std::string& component,
     doc["val_tpl"] = valTpl;
     if (!unit.empty()) doc["unit_of_meas"] = unit;
     if (!devClass.empty()) doc["dev_cla"] = devClass;
-    doc["uniq_id"] = "lora_" + safeId + "_" + suffix;
+    doc["uniq_id"] = "lora_" + haId + "_" + suffix;
     doc["avty_t"] = availTopic;
     if (!entCat.empty()) doc["ent_cat"] = entCat;
     if (precision >= 0) doc["sugg_dsp_prec"] = precision;
 
     JsonObject dev = doc.createNestedObject("dev");
-    dev["ids"] = "lora_" + safeId;
+    dev["ids"] = "lora_" + haId;
     dev["name"] = nodeId;
     dev["mdl"] = "LoRa Sensor Node";
     dev["mf"] = "DIY";
     dev["via_device"] = gateway.deviceName;
 
     MqttMessage msg;
-    msg.topic = "homeassistant/" + component + "/lora_" + safeId + "_" + suffix + "/config";
+    msg.topic = "homeassistant/" + component + "/lora_" + haId + "_" + suffix + "/config";
     serializeJson(doc, msg.payload);
     return msg;
 }
@@ -400,8 +452,11 @@ std::vector<MqttMessage> buildAutoDiscoveryMessages(const std::string& nodeId,
 }
 
 std::vector<MqttMessage> buildGatewayDiscoveryMessages(const GatewayIdentity& gateway) {
-    std::string gwId = toLower(gateway.deviceName);
-    std::replace(gwId.begin(), gwId.end(), ' ', '_');
+    // gwId is only ever used for this discovery topic/uniq_id/device-id, not
+    // for a real published topic, so it can go straight to the HA-safe slug
+    // (deviceName is user-editable via the config portal and could contain
+    // characters HA's discovery topic doesn't allow).
+    std::string gwId = haSafeSlug(gateway.deviceName);
     std::string stateTopic = gateway.baseTopic + "/gateway/state";
     std::string availTopic = availabilityTopic(gateway.baseTopic);
 

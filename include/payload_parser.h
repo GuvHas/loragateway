@@ -92,6 +92,25 @@ std::string htmlEscape(const std::string& raw);
 // let /approve or /remove act on the wrong id.
 std::string urlEncodeComponent(const std::string& raw);
 
+// Restricts a string to the character set Home Assistant's MQTT discovery
+// topic requires for its node_id/object_id segments: [a-z0-9_-] (lowercased
+// first). This is *stricter* than sanitizeMqttTopicSegment(), which only
+// guards against characters MQTT itself disallows ('/', '+', '#') — a
+// perfectly valid MQTT topic character like '~' or '.' is still illegal in
+// an HA discovery topic and gets silently rejected by HA (logged, not
+// errored back to the gateway) if it isn't also stripped here. Disallowed
+// characters are replaced with '_'; if any substitution happened, an 8-hex-
+// character hash of the original bytes is appended so that two different
+// ids which would otherwise collapse to the same slug (e.g. "a.b" and
+// "a~b", or a malformed id colliding with an already-legal "a_b") stay
+// distinguishable instead of one silently overwriting the other's discovery
+// config/uniq_id/device-id in Home Assistant. An already-clean id is
+// returned unchanged (no hash suffix), so existing HA entities for
+// well-formed node names are unaffected. Used only for the discovery topic/
+// uniq_id/device id — NOT for the sensor's actual state topic, which has no
+// such restriction and must keep matching decideRoute()'s topic exactly.
+std::string haSafeSlug(const std::string& raw);
+
 // ---------------------------------------------------------------------
 // Allowlist (replaces the inline CSV string scanning in main.cpp)
 // ---------------------------------------------------------------------
