@@ -224,6 +224,17 @@ static void test_url_encode_component_escapes_reserved_characters(void) {
     TEST_ASSERT_EQUAL_STRING("abc-_.~123", urlEncodeComponent("abc-_.~123").c_str());
 }
 
+static void test_ha_safe_slug_replaces_illegal_characters(void) {
+    // Home Assistant's discovery topic restricts node_id/object_id segments
+    // to [a-z0-9_-] -- stricter than plain MQTT topic rules, which allow
+    // '~' (e.g. a corrupted-in-transit reading like "ga~agetemp"). Disallowed
+    // characters become '_', not stripped, so corruption stays visible and
+    // two different bad ids can't collide into the same slug.
+    TEST_ASSERT_EQUAL_STRING("ga_agetemp", haSafeSlug("ga~agetemp").c_str());
+    TEST_ASSERT_EQUAL_STRING("kitchen", haSafeSlug("Kitchen").c_str());
+    TEST_ASSERT_EQUAL_STRING("a_b_c", haSafeSlug("a.b/c").c_str());
+}
+
 static void test_url_encoding_survives_html_escaping_round_trip(void) {
     // The bug this guards against: htmlEscape("a&b") -> "a&amp;b", which a
     // browser decodes straight back to "a&b" before parsing the query
@@ -352,6 +363,38 @@ static void test_build_gateway_discovery_messages_covers_diagnostics(void) {
     TEST_ASSERT_EQUAL_STRING("homeassistant/sensor/loragateway_dropped/config", messages[4].topic.c_str());
 }
 
+static void test_build_auto_discovery_messages_sanitizes_ha_illegal_characters(void) {
+    // Regression test for a real incident: a node id like "ga~agetemp"
+    // (e.g. an over-the-air bit error that still passed LoRa's CRC) must not
+    // produce an illegal Home Assistant discovery topic. HA logs and drops
+    // such a message rather than erroring back to the gateway, so this only
+    // ever surfaces as "missing entities" unless it's tested here.
+    GatewayIdentity gateway{"LoRaGateway", "lora/incoming"};
+    std::vector<MqttMessage> messages = buildAutoDiscoveryMessages("ga~agetemp", gateway);
+
+    TEST_ASSERT_EQUAL_STRING("homeassistant/sensor/lora_ga_agetemp_t/config", messages[0].topic.c_str());
+
+    StaticJsonDocument<1024> doc;
+    DeserializationError err = deserializeJson(doc, messages[0].payload);
+    TEST_ASSERT_FALSE(err);
+    TEST_ASSERT_EQUAL_STRING("lora_ga_agetemp_t", doc["uniq_id"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("lora_ga_agetemp", doc["dev"]["ids"].as<const char*>());
+    // The state topic is untouched by this fix: it must keep matching
+    // decideRoute()'s actual publish topic, which only guarantees
+    // MQTT-safety, not HA's stricter discovery-topic charset.
+    TEST_ASSERT_EQUAL_STRING("lora/incoming/ga~agetemp", doc["stat_t"].as<const char*>());
+}
+
+static void test_build_gateway_discovery_messages_sanitizes_ha_illegal_characters(void) {
+    // deviceName is user-editable via the config portal and isn't restricted
+    // to HA-safe characters, so it needs the same treatment as a node id.
+    GatewayIdentity gateway{"Kitchen's Gateway!", "lora/incoming"};
+    std::vector<MqttMessage> messages = buildGatewayDiscoveryMessages(gateway);
+
+    TEST_ASSERT_EQUAL_STRING("homeassistant/sensor/kitchen_s_gateway__wifi/config",
+                              messages[0].topic.c_str());
+}
+
 static void test_build_gateway_status_message(void) {
     GatewayIdentity gateway{"LoRaGateway", "lora/incoming"};
     GatewayStats stats;
@@ -410,6 +453,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_html_escape_neutralizes_script_tag);
     RUN_TEST(test_adversarial_id_is_topic_safe_but_still_needs_html_escaping);
     RUN_TEST(test_url_encode_component_escapes_reserved_characters);
+    RUN_TEST(test_ha_safe_slug_replaces_illegal_characters);
     RUN_TEST(test_url_encoding_survives_html_escaping_round_trip);
 
     RUN_TEST(test_allowlist_parses_csv_and_checks_case_insensitively);
@@ -426,6 +470,8 @@ int main(int argc, char** argv) {
     RUN_TEST(test_build_sensor_state_message_preserves_null_readings);
     RUN_TEST(test_build_auto_discovery_messages_covers_all_entities);
     RUN_TEST(test_build_gateway_discovery_messages_covers_diagnostics);
+    RUN_TEST(test_build_auto_discovery_messages_sanitizes_ha_illegal_characters);
+    RUN_TEST(test_build_gateway_discovery_messages_sanitizes_ha_illegal_characters);
     RUN_TEST(test_build_gateway_status_message);
 
     return UNITY_END();
