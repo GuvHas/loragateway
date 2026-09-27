@@ -94,6 +94,29 @@ void Esp32NodeStore::saveAllowListCsv(const std::string& csv) {
 // Esp32Display
 // ---------------------------------------------------------------------
 
+namespace {
+
+constexpr int kLineHeightPx = 13;    // ArialMT_Plain_10's own line height
+constexpr int kFooterTopPx = 52;     // where the footer starts; content must stay above this
+constexpr int kScreenWidthPx = 128;
+
+// Truncates `text` (appending "...") until it fits on one physical row, so a
+// showLines() entry can never wrap into more rows than the caller accounted
+// for and can never collide with the footer drawn below it.
+String fitToOneLine(SSD1306& display, const std::string& text) {
+    String full(text.c_str());
+    if (display.getStringWidth(full) <= kScreenWidthPx) return full;
+
+    std::string truncated = text;
+    while (!truncated.empty() &&
+           display.getStringWidth(String((truncated + "...").c_str())) > kScreenWidthPx) {
+        truncated.pop_back();
+    }
+    return String((truncated + "...").c_str());
+}
+
+} // namespace
+
 Esp32Display::Esp32Display(SSD1306& display, ActivityCallback onActivity)
     : display_(display), onActivity_(onActivity) {}
 
@@ -102,10 +125,15 @@ void Esp32Display::showLines(const std::vector<std::string>& lines) {
 
     display_.clear();
     display_.setFont(ArialMT_Plain_10);
+
+    // Each entry is drawn as exactly one physical row (truncated if it
+    // doesn't fit), so `y` always advances by a known amount and the loop
+    // stops before it would ever draw into the footer's territory below.
     int y = 0;
     for (const auto& line : lines) {
-        display_.drawStringMaxWidth(0, y, 128, String(line.c_str()));
-        y += 15;
+        if (y >= kFooterTopPx) break;
+        display_.drawString(0, y, fitToOneLine(display_, line));
+        y += kLineHeightPx;
     }
 
     // Footer: IP address + a coarse signal-strength indicator, drawn on

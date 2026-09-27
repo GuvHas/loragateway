@@ -1,12 +1,48 @@
 #include "orchestrator.h"
 
+#include <cstdio>
+
 namespace gateway {
+
+namespace {
+
+std::string formatOneDecimal(float value) {
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(value));
+    return std::string(buf);
+}
+
+// Builds a short, human-readable summary of a forwarded reading for the
+// OLED (3 short lines instead of the raw JSON payload, which either wraps
+// illegibly across the screen or gets truncated to something meaningless --
+// see Esp32Display::showLines()). The full JSON is still available via
+// PacketLogCallback / MQTT for anyone who needs every field.
+std::vector<std::string> buildForwardedSummary(const SensorReading& reading, const std::string& topic) {
+    std::string tempStr = reading.temperatureC.has_value() ? formatOneDecimal(*reading.temperatureC) + "C" : "--";
+    std::string humidityStr =
+        reading.humidityPct.has_value() ? formatOneDecimal(*reading.humidityPct) + "%" : "--";
+    std::string voltageStr =
+        reading.batteryVoltage.has_value() ? formatOneDecimal(*reading.batteryVoltage) + "V" : "--";
+
+    std::string line3 = "V: " + voltageStr;
+    if (reading.lowBattery) line3 += " LOW";
+    if (reading.err != SensorError::None) line3 += " ERR:" + reading.rawErr;
+
+    return {
+        "Fwd: " + topic,
+        "T: " + tempStr + " H: " + humidityStr,
+        line3,
+    };
+}
+
+} // namespace
 
 GatewayOrchestrator::GatewayOrchestrator(IWifiRadio& wifi, ILoRaReceiver& loRa, IMqttClient& mqtt,
                                           INodeStore& store, IDisplay& display, IClock& clock,
                                           std::string deviceName, std::string baseTopic,
                                           unsigned long mqttReconnectBackoffMs,
-                                          unsigned long wifiReconnectBackoffMs)
+                                          unsigned long wifiReconnectBackoffMs,
+                                          PacketLogCallback onPacketForwarded)
     : wifi_(wifi),
       loRa_(loRa),
       mqtt_(mqtt),
@@ -16,7 +52,8 @@ GatewayOrchestrator::GatewayOrchestrator(IWifiRadio& wifi, ILoRaReceiver& loRa, 
       deviceName_(std::move(deviceName)),
       baseTopic_(std::move(baseTopic)),
       mqttReconnectBackoffMs_(mqttReconnectBackoffMs),
-      wifiReconnectBackoffMs_(wifiReconnectBackoffMs) {}
+      wifiReconnectBackoffMs_(wifiReconnectBackoffMs),
+      onPacketForwarded_(onPacketForwarded) {}
 
 void GatewayOrchestrator::begin() {
     allowList_ = AllowList(store_.loadAllowListCsv());
@@ -174,8 +211,9 @@ void GatewayOrchestrator::ingestLoRaPacket() {
     }
 
     MqttMessage stateMsg = buildSensorStateMessage(reading, packet.rssi, route.topic);
+    if (onPacketForwarded_) onPacketForwarded_(stateMsg.topic, stateMsg.payload);
     enqueueOrPublish(stateMsg, false);
-    display_.showLines({"Fwd: " + stateMsg.topic, stateMsg.payload});
+    display_.showLines(buildForwardedSummary(reading, route.topic));
 }
 
 } // namespace gateway

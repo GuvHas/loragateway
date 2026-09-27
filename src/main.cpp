@@ -34,7 +34,9 @@
 #define MQTT_RECONNECT_MS      5000
 #define WIFI_RECONNECT_MS      10000
 #define WAKE_ON_SAVE_MS        10000
-#define WAKE_ON_PACKET_MS      5000
+// TEMP: bumped from 5000ms to give time to visually verify the OLED
+// formatting fix on hardware. Revert to 5000 once verified.
+#define WAKE_ON_PACKET_MS      60000
 #define STATUS_PUBLISH_MS      60000
 #define WDT_TIMEOUT_S          30
 
@@ -132,6 +134,12 @@ unsigned long lastStatusPublish = 0;
 // that display adapter needing to know about it.
 void wakeDisplay(unsigned long duration_ms);
 
+// Forward declaration: passed to the orchestrator (below) as its
+// PacketLogCallback, so the full JSON payload is still visible over Serial
+// even though the OLED (see Esp32Display::showLines()) only shows a short,
+// curated summary of each forwarded reading.
+void logForwardedPacket(const std::string& topic, const std::string& payload);
+
 // ==========================================
 //             GLOBAL OBJECTS
 // ==========================================
@@ -154,7 +162,7 @@ gateway::Esp32Clock esp32Clock;
 gateway::GatewayOrchestrator orchestrator(wifiRadio, loRaReceiver, mqttAdapter, nodeStore,
                                            esp32Display, esp32Clock, std::string(device_name),
                                            std::string(mqtt_topic), MQTT_RECONNECT_MS,
-                                           WIFI_RECONNECT_MS);
+                                           WIFI_RECONNECT_MS, logForwardedPacket);
 
 // WiFiManager Parameters
 WiFiManagerParameter custom_device_name("devname", "Device Name", "LoRaGateway", FIELD_LEN);
@@ -277,6 +285,17 @@ void wakeDisplay(unsigned long duration_ms) {
   isScreenOn = true;
   lastScreenUpdate = millis();
   screenTimeout = duration_ms;
+}
+
+// The OLED only shows a short summary of each forwarded reading (see
+// Esp32Display::showLines()), so the full JSON is logged here instead —
+// this is the orchestrator's PacketLogCallback, fired for every packet
+// that's successfully parsed and routed to an approved node.
+void logForwardedPacket(const std::string& topic, const std::string& payload) {
+  Serial.print("RX ");
+  Serial.print(topic.c_str());
+  Serial.print(": ");
+  Serial.println(payload.c_str());
 }
 
 // ==========================================

@@ -40,11 +40,22 @@ public:
     static constexpr unsigned long kDefaultMqttReconnectBackoffMs = 5000;
     static constexpr unsigned long kDefaultWifiReconnectBackoffMs = 10000;
 
+    // Invoked with (topic, payload) whenever a LoRa packet is successfully
+    // parsed and routed to an approved node, regardless of whether MQTT is
+    // currently reachable. A plain function pointer, like IDisplay's
+    // ActivityCallback in hal_esp32.h, so the orchestrator stays free of any
+    // Serial/logging dependency; main.cpp wires this to Serial.println() so
+    // the full JSON payload is still visible over USB even though the OLED
+    // (see buildForwardedSummary() in orchestrator.cpp) only shows a short,
+    // human-readable summary.
+    using PacketLogCallback = void (*)(const std::string& topic, const std::string& payload);
+
     GatewayOrchestrator(IWifiRadio& wifi, ILoRaReceiver& loRa, IMqttClient& mqtt, INodeStore& store,
                         IDisplay& display, IClock& clock, std::string deviceName,
                         std::string baseTopic,
                         unsigned long mqttReconnectBackoffMs = kDefaultMqttReconnectBackoffMs,
-                        unsigned long wifiReconnectBackoffMs = kDefaultWifiReconnectBackoffMs);
+                        unsigned long wifiReconnectBackoffMs = kDefaultWifiReconnectBackoffMs,
+                        PacketLogCallback onPacketForwarded = nullptr);
 
     // Loads the persisted allowlist from `store`. Call once during setup,
     // after the store itself is ready to be read from.
@@ -95,6 +106,7 @@ private:
     std::string baseTopic_;
     unsigned long mqttReconnectBackoffMs_;
     unsigned long wifiReconnectBackoffMs_;
+    PacketLogCallback onPacketForwarded_;
 
     AllowList allowList_;
     std::set<std::string> pendingNodes_;

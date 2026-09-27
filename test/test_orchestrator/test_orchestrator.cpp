@@ -13,6 +13,25 @@ namespace {
 const char* kKitchenSuccessPayload =
     R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":12,"seq":10,"lb":0,"err":"none"})";
 
+// Spy for GatewayOrchestrator::PacketLogCallback, which is a plain function
+// pointer (like Esp32Display's ActivityCallback), so it can't capture --
+// state has to live in globals reset at the top of each test that uses it.
+std::string g_loggedTopic;
+std::string g_loggedPayload;
+int g_logCallCount = 0;
+
+void resetPacketLogSpy() {
+    g_loggedTopic.clear();
+    g_loggedPayload.clear();
+    g_logCallCount = 0;
+}
+
+void packetLogSpy(const std::string& topic, const std::string& payload) {
+    g_loggedTopic = topic;
+    g_loggedPayload = payload;
+    g_logCallCount++;
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------
@@ -51,6 +70,114 @@ static void test_happy_path_publishes_discovery_and_state(void) {
     loRa.push(kKitchenSuccessPayload, -70);
     orchestrator.tick();
     TEST_ASSERT_EQUAL_UINT32(10, mqtt.published.size());
+}
+
+// ---------------------------------------------------------------------
+// OLED gets a curated summary, not the raw JSON (the JSON either wraps
+// illegibly across a 128x64 screen or gets truncated to something
+// meaningless -- see Esp32Display::showLines()); the full JSON is instead
+// handed to an optional PacketLogCallback so it stays visible over Serial.
+// ---------------------------------------------------------------------
+
+static void test_forwarded_packet_shows_curated_summary_not_raw_json(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    loRa.push(kKitchenSuccessPayload, -72);
+    orchestrator.tick();
+
+    TEST_ASSERT_EQUAL_UINT32(3, display.lastLines.size());
+    TEST_ASSERT_EQUAL_STRING("Fwd: lora/incoming/kitchen", display.lastLines[0].c_str());
+    TEST_ASSERT_EQUAL_STRING("T: 22.5C H: 45.0%", display.lastLines[1].c_str());
+    TEST_ASSERT_EQUAL_STRING("V: 4.1V", display.lastLines[2].c_str());
+    for (const auto& line : display.lastLines) {
+        TEST_ASSERT_TRUE(line.find('{') == std::string::npos);
+    }
+}
+
+static void test_forwarded_summary_flags_low_battery_and_dht_error(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("garage");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    // DHT failure (t/h null) plus a low-battery reading.
+    loRa.push(R"({"id":"garage","t":null,"h":null,"v":3.2,"boot":1,"seq":1,"lb":1,"err":"dht"})");
+    orchestrator.tick();
+
+    TEST_ASSERT_EQUAL_UINT32(3, display.lastLines.size());
+    TEST_ASSERT_EQUAL_STRING("T: -- H: --", display.lastLines[1].c_str());
+    TEST_ASSERT_EQUAL_STRING("V: 3.2V LOW ERR:dht", display.lastLines[2].c_str());
+}
+
+static void test_packet_forwarded_callback_receives_full_json_payload(void) {
+    resetPacketLogSpy();
+
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(
+        wifi, loRa, mqtt, store, display, clock, "LoRaGateway", "lora/incoming",
+        gateway::GatewayOrchestrator::kDefaultMqttReconnectBackoffMs,
+        gateway::GatewayOrchestrator::kDefaultWifiReconnectBackoffMs, packetLogSpy);
+    orchestrator.begin();
+
+    loRa.push(kKitchenSuccessPayload, -72);
+    orchestrator.tick();
+
+    TEST_ASSERT_EQUAL_INT(1, g_logCallCount);
+    TEST_ASSERT_EQUAL_STRING("lora/incoming/kitchen", g_loggedTopic.c_str());
+    // Unlike the OLED summary, the log callback gets the complete JSON.
+    TEST_ASSERT_TRUE(g_loggedPayload.find("\"id\":\"kitchen\"") != std::string::npos);
+    TEST_ASSERT_TRUE(g_loggedPayload.find("\"rssi\":-72") != std::string::npos);
+}
+
+static void test_packet_forwarded_callback_does_not_fire_for_pending_node(void) {
+    resetPacketLogSpy();
+
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store(""); // nothing approved
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(
+        wifi, loRa, mqtt, store, display, clock, "LoRaGateway", "lora/incoming",
+        gateway::GatewayOrchestrator::kDefaultMqttReconnectBackoffMs,
+        gateway::GatewayOrchestrator::kDefaultWifiReconnectBackoffMs, packetLogSpy);
+    orchestrator.begin();
+
+    loRa.push(R"({"id":"newnode"})");
+    orchestrator.tick();
+
+    TEST_ASSERT_EQUAL_INT(0, g_logCallCount);
 }
 
 static void test_unknown_node_is_pending_and_not_published(void) {
@@ -366,6 +493,10 @@ int main(int argc, char** argv) {
     UNITY_BEGIN();
 
     RUN_TEST(test_happy_path_publishes_discovery_and_state);
+    RUN_TEST(test_forwarded_packet_shows_curated_summary_not_raw_json);
+    RUN_TEST(test_forwarded_summary_flags_low_battery_and_dht_error);
+    RUN_TEST(test_packet_forwarded_callback_receives_full_json_payload);
+    RUN_TEST(test_packet_forwarded_callback_does_not_fire_for_pending_node);
     RUN_TEST(test_unknown_node_is_pending_and_not_published);
     RUN_TEST(test_approve_persists_and_clears_pending);
 
