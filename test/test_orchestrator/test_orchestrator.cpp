@@ -111,6 +111,47 @@ static void test_tick_drains_all_queued_lora_packets_in_one_call(void) {
     TEST_ASSERT_EQUAL_UINT32(27, mqtt.published.size());
 }
 
+// Codex review (P2): draining "until the buffer reports empty" has no
+// guaranteed termination if the producer (an ISR on real hardware) keeps
+// refilling as fast as tick() drains -- that would starve WiFi/OTA
+// housekeeping and the watchdog reset, eventually rebooting the gateway.
+// tick() must therefore process at most kMaxPacketsPerTick packets per call,
+// even when more are already available, catching up over subsequent ticks.
+static void test_tick_caps_packets_drained_per_call(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    // Prime discovery so every later packet only contributes one message,
+    // isolating this test to the per-tick packet-count cap alone.
+    loRa.push(kKitchenSuccessPayload); // seq 10
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // 8 discovery + 1 state
+
+    // Queue more packets than the per-tick budget allows.
+    const size_t kExtra = gateway::GatewayOrchestrator::kMaxPacketsPerTick + 5;
+    for (size_t i = 0; i < kExtra; ++i) {
+        std::string payload = std::string(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":12,"seq":)") +
+                               std::to_string(11 + i) + R"(,"lb":0,"err":"none"})";
+        loRa.push(payload);
+    }
+
+    orchestrator.tick(); // must NOT drain all of kExtra in one call
+    TEST_ASSERT_EQUAL_UINT32(9 + gateway::GatewayOrchestrator::kMaxPacketsPerTick, mqtt.published.size());
+
+    orchestrator.tick(); // catches up on the remaining 5 next tick
+    TEST_ASSERT_EQUAL_UINT32(9 + kExtra, mqtt.published.size());
+}
+
 // ---------------------------------------------------------------------
 // OLED gets a curated summary, not the raw JSON (the JSON either wraps
 // illegibly across a 128x64 screen or gets truncated to something
@@ -714,6 +755,7 @@ int main(int argc, char** argv) {
 
     RUN_TEST(test_happy_path_publishes_discovery_and_state);
     RUN_TEST(test_tick_drains_all_queued_lora_packets_in_one_call);
+    RUN_TEST(test_tick_caps_packets_drained_per_call);
     RUN_TEST(test_forwarded_packet_shows_curated_summary_not_raw_json);
     RUN_TEST(test_forwarded_summary_flags_low_battery_and_dht_error);
     RUN_TEST(test_packet_forwarded_callback_receives_full_json_payload);

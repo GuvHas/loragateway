@@ -178,14 +178,17 @@ void GatewayOrchestrator::onMessageDropped(const std::string& discoveryNodeId) {
 }
 
 void GatewayOrchestrator::ingestLoRaPacket() {
-    // Drains every packet currently buffered by the HAL, not just one, so a
-    // burst that arrived while tick() was busy elsewhere (e.g. blocked in
-    // MQTT I/O) doesn't trickle out one packet per subsequent loop()
-    // iteration. Esp32LoRaReceiver's own ring buffer is itself bounded (see
-    // hal_esp32.h), so this loop can't spin unbounded even under sustained
-    // flooding -- receive() simply returns false once it's empty.
+    // Drains up to kMaxPacketsPerTick packets currently buffered by the HAL
+    // per call, not just one, so a burst that arrived while tick() was busy
+    // elsewhere (e.g. blocked in MQTT I/O) doesn't trickle out one packet
+    // per subsequent loop() iteration. Bounded by a fixed budget rather than
+    // "keep going until receive() reports empty": the HAL's producer (an
+    // ISR on the ESP32 build) can keep refilling its own buffer for as long
+    // as packets keep arriving, so an unbounded loop has no guaranteed
+    // termination if arrivals keep pace with draining -- see
+    // kMaxPacketsPerTick's comment.
     RawPacket packet;
-    while (loRa_.receive(packet)) {
+    for (size_t i = 0; i < kMaxPacketsPerTick && loRa_.receive(packet); ++i) {
         ingestOnePacket(packet);
     }
 }

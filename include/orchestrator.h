@@ -38,6 +38,19 @@ public:
     // the newest one (see enqueueOrPublish()), and droppedMessageCount()
     // increments.
     static constexpr size_t kMaxQueuedMessages = 20;
+
+    // Bound on how many LoRa packets a single tick() will drain from the HAL
+    // (see ingestLoRaPacket()). The LoRa link is unauthenticated (a node id
+    // is treated as attacker-controlled elsewhere in this codebase, e.g.
+    // sanitizeMqttTopicSegment()), and the HAL's own producer (an ISR on the
+    // ESP32 build) can keep refilling its buffer for as long as packets keep
+    // arriving -- so draining "until the buffer reports empty" has no
+    // guaranteed termination if arrivals keep pace with draining. This fixed
+    // budget guarantees tick() always returns in bounded time regardless of
+    // concurrent arrivals, so WiFi/OTA housekeeping and the watchdog reset
+    // (both once per outer loop() iteration) are never starved.
+    static constexpr size_t kMaxPacketsPerTick = 20;
+
     static constexpr unsigned long kDefaultMqttReconnectBackoffMs = 5000;
     static constexpr unsigned long kDefaultWifiReconnectBackoffMs = 10000;
 
