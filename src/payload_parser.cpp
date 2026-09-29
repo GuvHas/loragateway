@@ -436,13 +436,22 @@ MqttMessage buildEntityDiscovery(const std::string& component,
     dev["mdl"] = "LoRa Sensor Node";
     dev["mf"] = "DIY";
     dev["via_device"] = gateway.deviceName;
-    // Deliberately no "sw" here: a sensor node's own firmware version isn't
-    // part of the payload contract (nodes have no OTA update path -- they're
-    // battery-powered and physically remote -- so it can't be added without
-    // a field the node would need to actually send), and stamping the
-    // gateway's own version here instead was actively misleading: two nodes
-    // running genuinely different firmware would both show the gateway's
-    // version, looking like they were running the same thing.
+    // Explicit JSON null, not simply omitted (Codex review): Home Assistant
+    // merges device-info fields across the several discovery configs that
+    // share one device id (its own discovery docs describe this), which
+    // only works if an *omitted* field means "leave whatever's already
+    // there" -- so a node already discovered under earlier firmware (like
+    // this gateway's own kFirmwareVersion-era releases) would keep showing
+    // that stale version forever if this key just vanished from later
+    // updates. An explicit null instead asks HA to clear it, the same
+    // "no value" idiom this file already uses for missing sensor readings
+    // (see doc["t"]/doc["h"]/doc["v"] above). A sensor node's own firmware
+    // version isn't part of the payload contract in the first place (nodes
+    // have no OTA path -- they're battery-powered and physically remote),
+    // and stamping the *gateway's* version here instead was actively
+    // misleading: two nodes on genuinely different firmware both showed the
+    // same "sw", looking like they were running identical firmware.
+    dev["sw"] = nullptr;
 
     MqttMessage msg;
     msg.topic = "homeassistant/" + component + "/lora_" + haId + "_" + suffix + "/config";

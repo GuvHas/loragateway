@@ -383,11 +383,14 @@ static void test_build_auto_discovery_messages_covers_all_entities(void) {
     TEST_ASSERT_FALSE(err);
     TEST_ASSERT_EQUAL_STRING("lora/incoming/kitchen", doc["stat_t"].as<const char*>());
     TEST_ASSERT_EQUAL_STRING("LoRaGateway", doc["dev"]["via_device"].as<const char*>());
-    // Node devices deliberately carry no "sw" field: a sensor node's own
-    // firmware version isn't part of the payload contract, and stamping the
-    // gateway's own version there instead was actively misleading (see the
-    // comment above kRestartCommandPayload in payload_parser.h).
-    TEST_ASSERT_FALSE(doc["dev"].containsKey("sw"));
+    // Node devices publish an explicit JSON null for "sw", not an omitted
+    // key: Home Assistant merges device-info fields across a device's
+    // several discovery configs, so merely omitting the key would leave a
+    // stale gateway-version string in place for any node already discovered
+    // under earlier firmware (Codex review on PR #22) -- explicit null is
+    // needed to actually clear it. See the comment at the call site.
+    TEST_ASSERT_TRUE(doc["dev"].containsKey("sw"));
+    TEST_ASSERT_TRUE(doc["dev"]["sw"].isNull());
 }
 
 static void test_build_gateway_discovery_messages_covers_diagnostics(void) {
