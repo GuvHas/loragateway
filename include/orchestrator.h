@@ -117,6 +117,7 @@ private:
     void enqueueOrPublish(const MqttMessage& msg, bool retain, const std::string& discoveryNodeId = "");
     void onMessagePublished(const std::string& discoveryNodeId);
     void onMessageDropped(const std::string& discoveryNodeId);
+    void publishNodeDiscovery(const std::string& nodeId, const std::string& swVersion);
     GatewayIdentity identity() const;
 
     IWifiRadio& wifi_;
@@ -150,6 +151,29 @@ private:
         uint32_t seq = 0;
     };
     std::map<std::string, LastSeen> lastSeenByNode_;
+
+    // Node id -> last "sw" value that node actually reported (see
+    // SensorReading::swVersion). A node only sends "sw" on its cold-boot
+    // packet to avoid wasting airtime/battery, so most packets carry no "sw"
+    // at all -- that must leave whatever's here untouched, not erase it.
+    // Absent from this map means "never reported", which discovery renders
+    // as an explicit JSON null (see buildAutoDiscoveryMessages()). Persisted
+    // via store_.save/loadNodeVersionsCsv() (Codex review on PR #23): purely
+    // in-memory, a gateway restart would forget every version it had learned
+    // and republish null for any node not due for another cold boot anytime
+    // soon.
+    std::map<std::string, std::string> swVersionByNode_;
+
+    // Node ids whose known "sw" changed while their previous discovery batch
+    // was still draining out of pendingDiscoveryCount_/outboundQueue_ (see
+    // ingestOnePacket()). Republishing immediately would desync that count
+    // from messages already in flight from the old batch, so the fresh
+    // republish is deferred until onMessagePublished() sees that batch
+    // actually finish -- without this, a version that changes again before
+    // the first batch completes would be silently and permanently lost,
+    // since a later packet reporting the same already-stored value never
+    // looks "changed" again (Codex review on PR #23).
+    std::set<std::string> pendingRediscovery_;
 
     std::deque<QueuedMessage> outboundQueue_;
 

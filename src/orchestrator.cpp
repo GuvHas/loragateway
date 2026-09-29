@@ -35,6 +35,40 @@ std::vector<std::string> buildForwardedSummary(const SensorReading& reading, con
     };
 }
 
+// Serializes/parses swVersionByNode_ for INodeStore::save/loadNodeVersionsCsv().
+// "id=version" pairs joined by ',', mirroring AllowList's own CSV format and
+// its same pragmatic assumption that neither a (sanitized) node id nor a git
+// short hash contains '=' or ',' -- this is gateway-internal persistence, not
+// something an attacker controls independently of what's already trusted
+// elsewhere (a node id reaching this point has already passed
+// sanitizeMqttTopicSegment()).
+std::string serializeNodeVersions(const std::map<std::string, std::string>& versions) {
+    std::string out;
+    for (const auto& entry : versions) {
+        if (!out.empty()) out += ",";
+        out += entry.first + "=" + entry.second;
+    }
+    return out;
+}
+
+std::map<std::string, std::string> parseNodeVersions(const std::string& csv) {
+    std::map<std::string, std::string> out;
+    size_t start = 0;
+    while (start <= csv.size()) {
+        size_t comma = csv.find(',', start);
+        if (comma == std::string::npos) comma = csv.size();
+        std::string entry = csv.substr(start, comma - start);
+        size_t eq = entry.find('=');
+        if (eq != std::string::npos) {
+            std::string id = entry.substr(0, eq);
+            std::string version = entry.substr(eq + 1);
+            if (!id.empty() && !version.empty()) out[id] = version;
+        }
+        start = comma + 1;
+    }
+    return out;
+}
+
 } // namespace
 
 GatewayOrchestrator::GatewayOrchestrator(IWifiRadio& wifi, ILoRaReceiver& loRa, IMqttClient& mqtt,
@@ -57,6 +91,7 @@ GatewayOrchestrator::GatewayOrchestrator(IWifiRadio& wifi, ILoRaReceiver& loRa, 
 
 void GatewayOrchestrator::begin() {
     allowList_ = AllowList(store_.loadAllowListCsv());
+    swVersionByNode_ = parseNodeVersions(store_.loadNodeVersionsCsv());
 }
 
 void GatewayOrchestrator::setIdentity(const std::string& deviceName, const std::string& baseTopic) {
@@ -67,6 +102,12 @@ void GatewayOrchestrator::setIdentity(const std::string& deviceName, const std::
 void GatewayOrchestrator::clearDiscoveredNodes() {
     discoveredNodes_.clear();
     pendingDiscoveryCount_.clear();
+    // Any batch pendingRediscovery_ was waiting on just got wiped above, so
+    // the next packet from these nodes will already take the isFirstDiscovery
+    // path in ingestOnePacket() with whatever's current in swVersionByNode_ --
+    // leaving a stale entry here would only cause a harmless but wasteful
+    // duplicate republish once that fresh batch completes.
+    pendingRediscovery_.clear();
 }
 
 bool GatewayOrchestrator::approveNode(const std::string& id) {
@@ -81,6 +122,13 @@ bool GatewayOrchestrator::removeNode(const std::string& id) {
     store_.saveAllowListCsv(allowList_.toCsv());
     discoveredNodes_.erase(id);
     pendingDiscoveryCount_.erase(id);
+    pendingRediscovery_.erase(id);
+    // A removed id can later be re-approved for a physically different node
+    // (a relabeled or replacement device); it should get a clean discovery
+    // rather than inheriting whatever firmware version the old device last
+    // reported under this id.
+    swVersionByNode_.erase(id);
+    store_.saveNodeVersionsCsv(serializeNodeVersions(swVersionByNode_));
     return true;
 }
 
@@ -195,6 +243,18 @@ void GatewayOrchestrator::onMessagePublished(const std::string& discoveryNodeId)
     if (--(it->second) == 0) {
         discoveredNodes_.insert(discoveryNodeId);
         pendingDiscoveryCount_.erase(it);
+
+        // A newer "sw" arrived while this batch was still draining out (see
+        // ingestOnePacket()) and was deferred rather than dropped; it's safe
+        // to reuse pendingDiscoveryCount_[discoveryNodeId] again now that
+        // this batch is fully accounted for, so republish immediately
+        // instead of waiting for a cold boot that might not happen again.
+        auto dirtyIt = pendingRediscovery_.find(discoveryNodeId);
+        if (dirtyIt != pendingRediscovery_.end()) {
+            pendingRediscovery_.erase(dirtyIt);
+            auto swIt = swVersionByNode_.find(discoveryNodeId);
+            publishNodeDiscovery(discoveryNodeId, swIt != swVersionByNode_.end() ? swIt->second : "");
+        }
     }
 }
 
@@ -205,6 +265,19 @@ void GatewayOrchestrator::onMessageDropped(const std::string& discoveryNodeId) {
     // node's next packet retries discovery from scratch instead of being
     // marked discovered without ever actually delivering all the configs.
     pendingDiscoveryCount_.erase(discoveryNodeId);
+    // That next packet's isFirstDiscovery path (see ingestOnePacket()) will
+    // already rebuild with whatever's current in swVersionByNode_, so a
+    // leftover dirty flag here would only cause a redundant duplicate
+    // republish once that fresh batch completes.
+    pendingRediscovery_.erase(discoveryNodeId);
+}
+
+void GatewayOrchestrator::publishNodeDiscovery(const std::string& nodeId, const std::string& swVersion) {
+    auto discoveryMsgs = buildAutoDiscoveryMessages(nodeId, identity(), swVersion);
+    pendingDiscoveryCount_[nodeId] = discoveryMsgs.size();
+    for (const auto& msg : discoveryMsgs) {
+        enqueueOrPublish(msg, true, nodeId);
+    }
 }
 
 void GatewayOrchestrator::ingestLoRaPacket() {
@@ -236,6 +309,29 @@ void GatewayOrchestrator::ingestOnePacket(const RawPacket& packet) {
     }
 
     const SensorReading& reading = parsed.reading;
+
+    // Captured and persisted regardless of approval state, before the
+    // Pending-node early return below: a brand new node's very first packet
+    // is itself a cold boot and the only opportunity to learn its real
+    // version before approval, since every packet after that (once it's
+    // already running) omits "sw" -- capturing this only after the Pending
+    // check would mean a node approved after its cold-boot packet never gets
+    // credited with the version it already announced (Codex review on PR
+    // #23). Most packets carry no "sw" at all, and that must leave whatever's
+    // already known untouched -- an absent optional here means "nothing new
+    // to report", never "clear it". Only a value that's actually different
+    // from what's stored (a real flash/battery-swap cold boot, not a
+    // retransmitted cold-boot packet) is worth persisting and republishing
+    // discovery over.
+    auto swIt = swVersionByNode_.find(reading.id);
+    std::string knownSw = swIt != swVersionByNode_.end() ? swIt->second : "";
+    bool swChanged = reading.swVersion.has_value() && *reading.swVersion != knownSw;
+    if (swChanged) {
+        swVersionByNode_[reading.id] = *reading.swVersion;
+        knownSw = *reading.swVersion;
+        store_.saveNodeVersionsCsv(serializeNodeVersions(swVersionByNode_));
+    }
+
     RoutingResult route = decideRoute(reading.id, baseTopic_, allowList_);
 
     if (route.decision == RouteDecision::Pending) {
@@ -245,11 +341,22 @@ void GatewayOrchestrator::ingestOnePacket(const RawPacket& packet) {
     }
 
     bool discoveryInFlight = pendingDiscoveryCount_.find(reading.id) != pendingDiscoveryCount_.end();
-    if (discoveredNodes_.find(reading.id) == discoveredNodes_.end() && !discoveryInFlight) {
-        auto discoveryMsgs = buildAutoDiscoveryMessages(reading.id, identity());
-        pendingDiscoveryCount_[reading.id] = discoveryMsgs.size();
-        for (const auto& msg : discoveryMsgs) {
-            enqueueOrPublish(msg, true, reading.id);
+    bool isFirstDiscovery = discoveredNodes_.find(reading.id) == discoveredNodes_.end() && !discoveryInFlight;
+
+    // Rebuild and (re-)publish this node's full discovery set on first
+    // sight, or when its known "sw" just changed. A change while a previous
+    // batch is still draining out of the queue can't republish immediately
+    // -- overwriting pendingDiscoveryCount_[reading.id] mid-flight would
+    // desync it from messages already counting down against the old value
+    // -- so it's deferred instead (see pendingRediscovery_ and
+    // onMessagePublished()).
+    if (isFirstDiscovery) {
+        publishNodeDiscovery(reading.id, knownSw);
+    } else if (swChanged) {
+        if (discoveryInFlight) {
+            pendingRediscovery_.insert(reading.id);
+        } else {
+            publishNodeDiscovery(reading.id, knownSw);
         }
     }
 

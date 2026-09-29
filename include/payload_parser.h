@@ -50,6 +50,15 @@ struct SensorReading {
     bool lowBattery = false;
     SensorError err = SensorError::None;
     std::string rawErr = "none"; // preserved verbatim for forward-compat forwarding
+    // Present only on a node's cold-boot packet (bootCount == 0 on the node's
+    // own counter): battery-powered nodes have no OTA path, so re-sending a
+    // static version string on every single transmission would waste airtime
+    // and battery for no benefit -- the firmware can't have changed between
+    // two packets from an already-running node. GatewayOrchestrator persists
+    // whatever value last arrived here (see swVersionByNode_) and only acts
+    // when it actually changes, so an absent "sw" on every later packet is
+    // "nothing new to report", not "clear what you had".
+    std::optional<std::string> swVersion;
 };
 
 enum class ParseError {
@@ -228,8 +237,16 @@ MqttMessage buildSensorStateMessage(const SensorReading& reading,
 // Home Assistant MQTT-discovery configs for one sensor node (temperature,
 // humidity, battery voltage, signal, boot count, sequence, low-battery,
 // error), mirroring the entities the original sendAutoDiscovery() published.
+// `swVersion` becomes the nested "dev" object's "sw" field when non-empty
+// (the node's actual firmware version, as last reported on a cold-boot
+// packet -- see SensorReading::swVersion and GatewayOrchestrator); an empty
+// string (the default, and the only option before this node ever sends
+// "sw") publishes an explicit JSON null instead of omitting the key, for the
+// same HA device-registry-merge reason documented at buildEntityDiscovery()'s
+// call site.
 std::vector<MqttMessage> buildAutoDiscoveryMessages(const std::string& nodeId,
-                                                     const GatewayIdentity& gateway);
+                                                     const GatewayIdentity& gateway,
+                                                     const std::string& swVersion = "");
 
 // Home Assistant MQTT-discovery configs for the gateway's own diagnostic
 // sensors (WiFi signal, free heap, packet count, store-and-forward queue

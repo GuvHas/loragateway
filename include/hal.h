@@ -76,6 +76,16 @@ public:
 
     virtual std::string loadAllowListCsv() = 0;
     virtual void saveAllowListCsv(const std::string& csv) = 0;
+
+    // Persists the last-known "sw" (firmware version) reported by each node
+    // (see GatewayOrchestrator::swVersionByNode_). Without this, a gateway
+    // restart would forget every version it had learned and republish a
+    // stale/null value to Home Assistant for any node not due for another
+    // cold boot any time soon (Codex review on PR #23). Encoding is up to
+    // the concrete implementation, as long as it round-trips through its own
+    // save/load pair -- GatewayOrchestrator treats it as an opaque blob.
+    virtual std::string loadNodeVersionsCsv() = 0;
+    virtual void saveNodeVersionsCsv(const std::string& csv) = 0;
 };
 
 class IDisplay {
