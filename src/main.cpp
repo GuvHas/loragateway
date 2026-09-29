@@ -420,6 +420,13 @@ void setup() {
   LoRa.setSpreadingFactor(LORA_SF);
   LoRa.enableCrc();
 
+  // Switches from polling LoRa.parsePacket() (once per loop() iteration) to
+  // an interrupt-driven receive via the SX1276's DIO0 pin, so a packet
+  // arriving while loop() is stuck in blocking MQTT/network I/O still gets
+  // captured instead of missed. See Esp32LoRaReceiver::begin() and its
+  // class comment in hal_esp32.h.
+  loRaReceiver.begin();
+
   wm.setConfigPortalBlocking(false);
   wm.setSaveConfigCallback(saveConfigCallback);
 

@@ -21,18 +21,55 @@ void Esp32WifiRadio::reconnect() {
 // Esp32LoRaReceiver
 // ---------------------------------------------------------------------
 
-bool Esp32LoRaReceiver::receive(RawPacket& out) {
-    int packetSize = LoRa.parsePacket();
-    if (!packetSize) return false;
+Esp32LoRaReceiver* Esp32LoRaReceiver::instance_ = nullptr;
 
-    std::string data;
-    data.reserve(packetSize);
-    while (LoRa.available()) {
-        data += static_cast<char>(LoRa.read());
+Esp32LoRaReceiver::Esp32LoRaReceiver() {
+    instance_ = this;
+}
+
+void Esp32LoRaReceiver::begin() {
+    LoRa.onReceive(&Esp32LoRaReceiver::handleDio0ReceiveTrampoline);
+    LoRa.receive(); // continuous-receive mode: DIO0 now fires on every RX done
+}
+
+void Esp32LoRaReceiver::handleDio0ReceiveTrampoline(int packetSize) {
+    if (instance_) instance_->onDio0Receive(packetSize);
+}
+
+void Esp32LoRaReceiver::onDio0Receive(int packetSize) {
+    if (packetSize <= 0) return;
+
+    size_t head = head_.load(std::memory_order_relaxed);
+    size_t tail = tail_.load(std::memory_order_acquire);
+    if (head - tail >= kRingCapacity) {
+        // Consumer (receive(), drained every orchestrator tick()) isn't
+        // keeping up; drop rather than block in an ISR or overrun the ring.
+        droppedByIsr_.fetch_add(1, std::memory_order_relaxed);
+        return;
     }
 
-    out.data = std::move(data);
-    out.rssi = LoRa.packetRssi();
+    IsrPacket& slot = ring_[head % kRingCapacity];
+    slot.length = 0;
+    while (LoRa.available() && slot.length < kMaxPacketBytes) {
+        slot.data[slot.length++] = static_cast<uint8_t>(LoRa.read());
+    }
+    slot.rssi = LoRa.packetRssi();
+
+    // Publish the slot to the consumer only after it's fully written.
+    head_.store(head + 1, std::memory_order_release);
+}
+
+bool Esp32LoRaReceiver::receive(RawPacket& out) {
+    size_t tail = tail_.load(std::memory_order_relaxed);
+    if (tail == head_.load(std::memory_order_acquire)) {
+        return false; // ring buffer empty
+    }
+
+    const IsrPacket& slot = ring_[tail % kRingCapacity];
+    out.data.assign(reinterpret_cast<const char*>(slot.data), slot.length);
+    out.rssi = slot.rssi;
+
+    tail_.store(tail + 1, std::memory_order_release);
     return true;
 }
 

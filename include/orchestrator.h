@@ -91,6 +91,7 @@ private:
     void attemptMqttReconnect();
     void flushQueue();
     void ingestLoRaPacket();
+    void ingestOnePacket(const RawPacket& packet);
     void enqueueOrPublish(const MqttMessage& msg, bool retain, const std::string& discoveryNodeId = "");
     void onMessagePublished(const std::string& discoveryNodeId);
     void onMessageDropped(const std::string& discoveryNodeId);
