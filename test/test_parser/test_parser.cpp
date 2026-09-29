@@ -345,6 +345,11 @@ static void test_availability_topic_suffix(void) {
     TEST_ASSERT_EQUAL_STRING("lora/incoming/gateway/status", availabilityTopic("lora/incoming").c_str());
 }
 
+static void test_gateway_command_topic_format(void) {
+    TEST_ASSERT_EQUAL_STRING("lora/incoming/gateway/command/restart",
+                              gatewayCommandTopic("lora/incoming", "restart").c_str());
+}
+
 static void test_build_sensor_state_message_preserves_null_readings(void) {
     ParseResult parsed = parseSensorPayload(std::string(
         R"({"id":"node_name","t":null,"h":null,"v":4.1,"boot":13,"seq":11,"lb":0,"err":"dht"})"));
@@ -401,6 +406,24 @@ static void test_build_gateway_discovery_messages_covers_diagnostics(void) {
     TEST_ASSERT_EQUAL_STRING("{{ value_json.uptime_s }}", doc["val_tpl"].as<const char*>());
     TEST_ASSERT_EQUAL_STRING("s", doc["unit_of_meas"].as<const char*>());
     TEST_ASSERT_EQUAL_STRING("duration", doc["dev_cla"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING(kFirmwareVersion, doc["dev"]["sw"].as<const char*>());
+}
+
+static void test_build_gateway_command_discovery_messages_covers_restart_button(void) {
+    GatewayIdentity gateway{"LoRaGateway", "lora/incoming"};
+    std::vector<MqttMessage> messages = buildGatewayCommandDiscoveryMessages(gateway);
+
+    TEST_ASSERT_EQUAL_UINT32(1, messages.size());
+    TEST_ASSERT_EQUAL_STRING("homeassistant/button/loragateway_restart/config", messages[0].topic.c_str());
+
+    StaticJsonDocument<1024> doc;
+    DeserializationError err = deserializeJson(doc, messages[0].payload);
+    TEST_ASSERT_FALSE(err);
+    TEST_ASSERT_EQUAL_STRING("lora/incoming/gateway/command/restart", doc["cmd_t"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING(kRestartCommandPayload, doc["payload_press"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("restart", doc["dev_cla"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("config", doc["ent_cat"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("lora/incoming/gateway/status", doc["avty_t"].as<const char*>());
     TEST_ASSERT_EQUAL_STRING(kFirmwareVersion, doc["dev"]["sw"].as<const char*>());
 }
 
@@ -525,9 +548,11 @@ int main(int argc, char** argv) {
     RUN_TEST(test_decide_route_approved_builds_lowercase_topic);
 
     RUN_TEST(test_availability_topic_suffix);
+    RUN_TEST(test_gateway_command_topic_format);
     RUN_TEST(test_build_sensor_state_message_preserves_null_readings);
     RUN_TEST(test_build_auto_discovery_messages_covers_all_entities);
     RUN_TEST(test_build_gateway_discovery_messages_covers_diagnostics);
+    RUN_TEST(test_build_gateway_command_discovery_messages_covers_restart_button);
     RUN_TEST(test_build_auto_discovery_messages_sanitizes_ha_illegal_characters);
     RUN_TEST(test_build_gateway_discovery_messages_sanitizes_ha_illegal_characters);
     RUN_TEST(test_build_gateway_status_message);

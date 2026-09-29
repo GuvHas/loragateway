@@ -96,8 +96,18 @@ void GatewayOrchestrator::tick() {
     if (wifi_.connected()) {
         if (mqtt_.connected()) {
             mqtt_.loop();
+            // Retried every tick until it succeeds, not just once right
+            // after connect(): the SUBSCRIBE packet write itself can fail
+            // (e.g. a socket drop mid-write) without necessarily taking the
+            // connection down, in which case connected() stays true but
+            // commands would otherwise go unheard until some later,
+            // unrelated disconnect/reconnect forced a retry.
+            if (!commandsSubscribed_) {
+                commandsSubscribed_ = subscribeToCommands();
+            }
             flushQueue();
         } else {
+            commandsSubscribed_ = false;
             attemptMqttReconnect();
         }
     } else {
@@ -129,8 +139,28 @@ void GatewayOrchestrator::attemptMqttReconnect() {
     display_.showLines({"MQTT Reconnecting..."});
     if (mqtt_.connect()) {
         display_.showLines({"MQTT Connected!"});
+        // Also retried every tick while connected (see tick()) in case this
+        // particular attempt fails without the connection itself dropping.
+        commandsSubscribed_ = subscribeToCommands();
         flushQueue();
     }
+}
+
+bool GatewayOrchestrator::subscribeToCommands() {
+    return mqtt_.subscribe(
+        gatewayCommandTopic(baseTopic_, "restart"), [this](const std::string& topic, const std::string& payload) {
+            if (payload != kRestartCommandPayload) return;
+            // Clear any retained message on this topic before acting on it:
+            // without this, a stale retained "PRESS" -- left by a manual
+            // `mosquitto_pub -r`, a misconfigured automation, or even a
+            // button whose own retain setting gets changed -- would be
+            // redelivered by the broker on every future subscribe (i.e.
+            // every MQTT reconnect), causing an infinite reboot loop that
+            // only clearing the broker's retained message by hand could
+            // break.
+            mqtt_.publish(topic, "", true);
+            restartRequested_ = true;
+        });
 }
 
 void GatewayOrchestrator::flushQueue() {

@@ -363,6 +363,10 @@ std::string availabilityTopic(const std::string& baseTopic) {
     return baseTopic + "/gateway/status";
 }
 
+std::string gatewayCommandTopic(const std::string& baseTopic, const std::string& commandName) {
+    return baseTopic + "/gateway/command/" + commandName;
+}
+
 MqttMessage buildSensorStateMessage(const SensorReading& reading, int rssi, const std::string& topic) {
     StaticJsonDocument<kSensorJsonCapacity> doc;
     doc["id"] = reading.id;
@@ -506,6 +510,44 @@ std::vector<MqttMessage> buildGatewayDiscoveryMessages(const GatewayIdentity& ga
     // buildGatewayStatusMessage() below) but had no discovery entity, so it
     // was never visible in Home Assistant despite being on the wire.
     messages.push_back(buildGwSensor("uptime", "Uptime", "{{ value_json.uptime_s }}", "s", "duration"));
+    return messages;
+}
+
+std::vector<MqttMessage> buildGatewayCommandDiscoveryMessages(const GatewayIdentity& gateway) {
+    std::string gwId = haSafeSlug(gateway.deviceName);
+    std::string availTopic = availabilityTopic(gateway.baseTopic);
+
+    auto buildGwButton = [&](const std::string& suffix, const std::string& nameSuffix,
+                              const std::string& cmdTopic, const std::string& devClass) {
+        StaticJsonDocument<kDiscoveryJsonCapacity> doc;
+        doc["name"] = gateway.deviceName + " " + nameSuffix;
+        doc["cmd_t"] = cmdTopic;
+        doc["payload_press"] = kRestartCommandPayload;
+        if (!devClass.empty()) doc["dev_cla"] = devClass;
+        doc["uniq_id"] = gwId + "_" + suffix;
+        doc["avty_t"] = availTopic;
+        // Restart (like any command that changes device behavior rather than
+        // reporting it) is a "config" entity in HA's convention, distinct
+        // from the "diagnostic" category used for the read-only sensors in
+        // buildGatewayDiscoveryMessages().
+        doc["ent_cat"] = "config";
+
+        JsonObject dev = doc.createNestedObject("dev");
+        dev["ids"] = gwId;
+        dev["name"] = gateway.deviceName;
+        dev["mdl"] = "ESP32 LoRa Gateway";
+        dev["mf"] = "DIY";
+        dev["sw"] = kFirmwareVersion;
+
+        MqttMessage msg;
+        msg.topic = "homeassistant/button/" + gwId + "_" + suffix + "/config";
+        serializeJson(doc, msg.payload);
+        return msg;
+    };
+
+    std::vector<MqttMessage> messages;
+    messages.push_back(buildGwButton("restart", "Restart", gatewayCommandTopic(gateway.baseTopic, "restart"),
+                                      "restart"));
     return messages;
 }
 

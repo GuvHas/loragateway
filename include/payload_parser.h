@@ -201,7 +201,22 @@ struct GatewayStats {
 // call site in buildEntityDiscovery().
 constexpr const char* kFirmwareVersion = "1.1.0";
 
+// Payload the gateway's restart button (buildGatewayCommandDiscoveryMessages)
+// publishes on press, and the only payload GatewayOrchestrator's restart
+// command handler acts on -- kept as one shared constant so the discovery
+// message and the handler can't silently drift apart.
+constexpr const char* kRestartCommandPayload = "PRESS";
+
 std::string availabilityTopic(const std::string& baseTopic);
+
+// Command topic for a named gateway command, e.g.
+// gatewayCommandTopic("lora/incoming", "restart") ->
+// "lora/incoming/gateway/command/restart". Mirrors the existing
+// "<baseTopic>/gateway/state" and availabilityTopic()'s "<baseTopic>/gateway/
+// status" conventions. Intended for more than just restart: any future
+// gateway-directed command (and eventually per-node LoRa downlinks) can use
+// the same "<baseTopic>/gateway/command/<name>" shape.
+std::string gatewayCommandTopic(const std::string& baseTopic, const std::string& commandName);
 
 // State message for a single sensor reading, published to
 // "<baseTopic>/<sanitized-id>" (the RoutingResult::topic from decideRoute).
@@ -217,8 +232,15 @@ std::vector<MqttMessage> buildAutoDiscoveryMessages(const std::string& nodeId,
 
 // Home Assistant MQTT-discovery configs for the gateway's own diagnostic
 // sensors (WiFi signal, free heap, packet count, store-and-forward queue
-// depth, dropped-message count).
+// depth, dropped-message count, uptime).
 std::vector<MqttMessage> buildGatewayDiscoveryMessages(const GatewayIdentity& gateway);
+
+// Home Assistant MQTT-discovery configs for the gateway's own command
+// entities (currently just a "Restart" button, device_class: restart).
+// Separate from buildGatewayDiscoveryMessages() because these are `button`
+// (command-only, no state) entities rather than `sensor` ones -- a different
+// HA discovery component, hence a different discovery topic shape.
+std::vector<MqttMessage> buildGatewayCommandDiscoveryMessages(const GatewayIdentity& gateway);
 
 // Gateway self-status state message published periodically.
 MqttMessage buildGatewayStatusMessage(const GatewayIdentity& gateway, const GatewayStats& stats);

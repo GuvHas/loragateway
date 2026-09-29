@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 
 #include "hal.h"
 
@@ -110,14 +111,25 @@ public:
     bool connect() override;
     void disconnect() override;
     bool publish(const std::string& topic, const std::string& payload, bool retain) override;
+    bool subscribe(const std::string& topic, MessageCallback callback) override;
     void loop() override;
 
 private:
+    // PubSubClient's incoming-message callback only fires from inside
+    // loop() (called synchronously from GatewayOrchestrator::tick(), i.e.
+    // normal application context, never an interrupt) -- unlike LoRa's
+    // onReceive() (see Esp32LoRaReceiver), PubSubClient.h's
+    // MQTT_CALLBACK_SIGNATURE is a std::function on ESP32/ESP8266, so it can
+    // bind straight to a capturing lambda in the constructor. No static
+    // instance pointer/trampoline indirection is needed here.
+    void dispatchIncomingMessage(char* topic, uint8_t* payload, unsigned int length);
+
     PubSubClient& client_;
     std::string deviceNamePrefix_;
     std::string user_;
     std::string pass_;
     std::string lwtTopic_;
+    std::map<std::string, MessageCallback> subscriptions_;
 };
 
 // Wraps Preferences for the "allow" (allowlist CSV) key.
