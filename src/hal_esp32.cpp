@@ -148,6 +148,14 @@ void Esp32NodeStore::saveAllowListCsv(const std::string& csv) {
     prefs_.putString("allow", csv.c_str());
 }
 
+std::string Esp32NodeStore::loadNodeVersionsCsv() {
+    return std::string(prefs_.getString("swver", "").c_str());
+}
+
+void Esp32NodeStore::saveNodeVersionsCsv(const std::string& csv) {
+    prefs_.putString("swver", csv.c_str());
+}
+
 // ---------------------------------------------------------------------
 // Esp32Display
 // ---------------------------------------------------------------------

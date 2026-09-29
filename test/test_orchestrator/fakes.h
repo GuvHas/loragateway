@@ -104,7 +104,8 @@ private:
 
 class FakeStore : public gateway::INodeStore {
 public:
-    explicit FakeStore(std::string initialCsv = "") : csv_(std::move(initialCsv)) {}
+    explicit FakeStore(std::string initialCsv = "", std::string initialNodeVersionsCsv = "")
+        : csv_(std::move(initialCsv)), nodeVersionsCsv_(std::move(initialNodeVersionsCsv)) {}
 
     std::string loadAllowListCsv() override { return csv_; }
 
@@ -113,8 +114,17 @@ public:
         saveCount++;
     }
 
+    std::string loadNodeVersionsCsv() override { return nodeVersionsCsv_; }
+
+    void saveNodeVersionsCsv(const std::string& csv) override {
+        nodeVersionsCsv_ = csv;
+        nodeVersionsSaveCount++;
+    }
+
     std::string csv_;
     int saveCount = 0;
+    std::string nodeVersionsCsv_;
+    int nodeVersionsSaveCount = 0;
 };
 
 class FakeDisplay : public gateway::IDisplay {
