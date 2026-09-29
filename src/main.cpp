@@ -126,6 +126,13 @@ unsigned long lastScreenUpdate = 0;
 unsigned long screenTimeout = SCREEN_TIMEOUT_MS;
 bool isScreenOn = true;
 unsigned long lastStatusPublish = 0;
+// Global (not function-local) so the config-save handler below can reset it
+// when the base topic/device name changes: otherwise gateway-level
+// discovery (sensors + the restart button) would keep pointing Home
+// Assistant at the old topics/device id until the next reboot, even though
+// orchestrator.setIdentity() and clearDiscoveredNodes() already refresh the
+// per-node discovery bookkeeping for exactly the same kind of change.
+bool gatewayDiscoverySent = false;
 
 // Forward declaration: Esp32Display (below) invokes this on every display
 // update so the existing screen-timeout bookkeeping keeps working without
@@ -546,6 +553,12 @@ void loop() {
 
     orchestrator.setIdentity(device_name, mqtt_topic);
     orchestrator.clearDiscoveredNodes();
+    // Same reasoning as clearDiscoveredNodes() above, but for the gateway's
+    // own discovery (sensors + restart button) rather than per-node: without
+    // this, Home Assistant would keep the old topic/device id cached from
+    // before this change until the gateway is manually rebooted, silently
+    // breaking the restart button in the meantime.
+    gatewayDiscoverySent = false;
     mqttAdapter.configure(device_name, mqtt_user, mqtt_pass,
                            gateway::availabilityTopic(std::string(mqtt_topic)));
     client.setServer(mqtt_server, atoi(mqtt_port));
@@ -569,7 +582,6 @@ void loop() {
   // connected without WiFi also being up.
   if (mqttAdapter.connected() && (millis() - lastStatusPublish > STATUS_PUBLISH_MS)) {
     lastStatusPublish = millis();
-    static bool gatewayDiscoverySent = false;
     if (!gatewayDiscoverySent) {
       sendGatewayDiscovery();
       gatewayDiscoverySent = true;

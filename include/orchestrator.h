@@ -110,7 +110,7 @@ public:
 private:
     void attemptWifiReconnect();
     void attemptMqttReconnect();
-    void subscribeToCommands();
+    bool subscribeToCommands();
     void flushQueue();
     void ingestLoRaPacket();
     void ingestOnePacket(const RawPacket& packet);
@@ -163,6 +163,10 @@ private:
     unsigned long lastWifiReconnectAttemptMs_ = 0;
 
     bool restartRequested_ = false;
+    // Whether subscribeToCommands() has succeeded since the last connect();
+    // reset to false on disconnect and retried every tick() while connected
+    // until it succeeds (see tick()).
+    bool commandsSubscribed_ = false;
 };
 
 } // namespace gateway

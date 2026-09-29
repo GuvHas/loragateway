@@ -849,6 +849,74 @@ static void test_resubscribes_to_restart_topic_after_reconnect(void) {
     TEST_ASSERT_TRUE(orchestrator.restartRequested());
 }
 
+// Codex review (P1): a *retained* "PRESS" left on the command topic (a
+// manual `mosquitto_pub -r`, a misconfigured automation, or a button whose
+// retain setting changes) would otherwise be redelivered by the broker on
+// every future subscribe -- i.e. every MQTT reconnect -- causing an
+// infinite reboot loop. Consuming a valid command must clear any retention
+// on that topic.
+static void test_restart_command_clears_retained_message_to_prevent_reboot_loop(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    FakeStore store;
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    orchestrator.tick();
+    mqtt.simulateIncomingMessage("lora/incoming/gateway/command/restart", "PRESS");
+
+    TEST_ASSERT_TRUE(orchestrator.restartRequested());
+    TEST_ASSERT_FALSE(mqtt.published.empty());
+    const auto& clearMsg = mqtt.published.back();
+    TEST_ASSERT_EQUAL_STRING("lora/incoming/gateway/command/restart", clearMsg.topic.c_str());
+    TEST_ASSERT_EQUAL_STRING("", clearMsg.payload.c_str());
+    TEST_ASSERT_TRUE(clearMsg.retain);
+}
+
+// Codex review (P2): if connect() succeeds but the SUBSCRIBE packet write
+// itself fails (e.g. a socket drop mid-write) without taking the connection
+// down, connected() stays true but restart commands would otherwise go
+// unheard forever, since subscribing was previously only attempted once,
+// right after connect(). It must keep retrying every tick until it succeeds.
+static void test_failed_subscribe_is_retried_on_a_later_tick(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.subscribeShouldSucceed = false;
+    FakeStore store;
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    orchestrator.tick(); // connects; the subscribe attempt fails
+    TEST_ASSERT_TRUE(mqtt.connected());
+    TEST_ASSERT_EQUAL_UINT32(1, mqtt.subscribeCalls.size());
+
+    orchestrator.tick(); // still connected: must retry the failed subscribe
+    TEST_ASSERT_EQUAL_UINT32(2, mqtt.subscribeCalls.size());
+
+    mqtt.subscribeShouldSucceed = true;
+    orchestrator.tick(); // this attempt succeeds
+    TEST_ASSERT_EQUAL_UINT32(3, mqtt.subscribeCalls.size());
+
+    // Once subscribed, further ticks must not keep re-subscribing.
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(3, mqtt.subscribeCalls.size());
+
+    mqtt.simulateIncomingMessage("lora/incoming/gateway/command/restart", "PRESS");
+    TEST_ASSERT_TRUE(orchestrator.restartRequested());
+}
+
 int main(int argc, char** argv) {
     UNITY_BEGIN();
 
@@ -883,6 +951,8 @@ int main(int argc, char** argv) {
     RUN_TEST(test_restart_command_sets_restart_requested_flag);
     RUN_TEST(test_restart_command_ignores_unexpected_payload);
     RUN_TEST(test_resubscribes_to_restart_topic_after_reconnect);
+    RUN_TEST(test_restart_command_clears_retained_message_to_prevent_reboot_loop);
+    RUN_TEST(test_failed_subscribe_is_retried_on_a_later_tick);
 
     return UNITY_END();
 }
