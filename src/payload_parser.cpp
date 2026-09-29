@@ -12,12 +12,22 @@ namespace gateway {
 namespace {
 
 constexpr size_t kSensorJsonCapacity = 512;
-// 700, not 600: the extra "sw" (firmware version) field added to every
-// entity's nested "dev" object pushed the previous 600-byte capacity just
-// over the edge, which ArduinoJson handles by silently dropping the
-// assignment rather than erroring -- caught by test_parser's discovery tests
-// deserializing and asserting on "sw" specifically.
+// 700, not 600: the "sw" (firmware version) field on the gateway's own
+// discovery entities' nested "dev" object pushed the previous 600-byte
+// capacity just over the edge, which ArduinoJson handles by silently
+// dropping the assignment rather than erroring -- caught by test_parser's
+// discovery tests deserializing and asserting on "sw" specifically. Still
+// needed even though per-node discovery no longer carries "sw" (see
+// buildEntityDiscovery()): this capacity is shared by both.
 constexpr size_t kDiscoveryJsonCapacity = 700;
+
+// Falls back to "dev" only if scripts/inject_git_version.py's build flag
+// somehow didn't run (e.g. building outside PlatformIO, or the native test
+// env, which deliberately skips it -- see platformio.ini's comment). On the
+// real firmware build this is always the actual git short hash.
+#ifndef GATEWAY_FW_VERSION
+#define GATEWAY_FW_VERSION "dev"
+#endif
 constexpr size_t kStatusJsonCapacity = 384;
 
 std::string trim(const std::string& s) {
@@ -426,9 +436,22 @@ MqttMessage buildEntityDiscovery(const std::string& component,
     dev["mdl"] = "LoRa Sensor Node";
     dev["mf"] = "DIY";
     dev["via_device"] = gateway.deviceName;
-    // See kFirmwareVersion's comment: this is the gateway firmware's
-    // version, not the sensor node's own (not part of the payload contract).
-    dev["sw"] = kFirmwareVersion;
+    // Explicit JSON null, not simply omitted (Codex review): Home Assistant
+    // merges device-info fields across the several discovery configs that
+    // share one device id (its own discovery docs describe this), which
+    // only works if an *omitted* field means "leave whatever's already
+    // there" -- so a node already discovered under earlier firmware (like
+    // this gateway's own kFirmwareVersion-era releases) would keep showing
+    // that stale version forever if this key just vanished from later
+    // updates. An explicit null instead asks HA to clear it, the same
+    // "no value" idiom this file already uses for missing sensor readings
+    // (see doc["t"]/doc["h"]/doc["v"] above). A sensor node's own firmware
+    // version isn't part of the payload contract in the first place (nodes
+    // have no OTA path -- they're battery-powered and physically remote),
+    // and stamping the *gateway's* version here instead was actively
+    // misleading: two nodes on genuinely different firmware both showed the
+    // same "sw", looking like they were running identical firmware.
+    dev["sw"] = nullptr;
 
     MqttMessage msg;
     msg.topic = "homeassistant/" + component + "/lora_" + haId + "_" + suffix + "/config";
@@ -491,7 +514,7 @@ std::vector<MqttMessage> buildGatewayDiscoveryMessages(const GatewayIdentity& ga
         dev["name"] = gateway.deviceName;
         dev["mdl"] = "ESP32 LoRa Gateway";
         dev["mf"] = "DIY";
-        dev["sw"] = kFirmwareVersion;
+        dev["sw"] = GATEWAY_FW_VERSION;
 
         MqttMessage msg;
         msg.topic = "homeassistant/sensor/" + gwId + "_" + suffix + "/config";
@@ -537,7 +560,7 @@ std::vector<MqttMessage> buildGatewayCommandDiscoveryMessages(const GatewayIdent
         dev["name"] = gateway.deviceName;
         dev["mdl"] = "ESP32 LoRa Gateway";
         dev["mf"] = "DIY";
-        dev["sw"] = kFirmwareVersion;
+        dev["sw"] = GATEWAY_FW_VERSION;
 
         MqttMessage msg;
         msg.topic = "homeassistant/button/" + gwId + "_" + suffix + "/config";
