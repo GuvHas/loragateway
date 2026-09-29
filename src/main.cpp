@@ -34,9 +34,7 @@
 #define MQTT_RECONNECT_MS      5000
 #define WIFI_RECONNECT_MS      10000
 #define WAKE_ON_SAVE_MS        10000
-// TEMP: bumped from 5000ms to give time to visually verify the OLED
-// formatting fix on hardware. Revert to 5000 once verified.
-#define WAKE_ON_PACKET_MS      60000
+#define WAKE_ON_PACKET_MS      5000
 #define STATUS_PUBLISH_MS      60000
 #define WDT_TIMEOUT_S          30
 
