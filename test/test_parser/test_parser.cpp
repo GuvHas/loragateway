@@ -383,10 +383,11 @@ static void test_build_auto_discovery_messages_covers_all_entities(void) {
     TEST_ASSERT_FALSE(err);
     TEST_ASSERT_EQUAL_STRING("lora/incoming/kitchen", doc["stat_t"].as<const char*>());
     TEST_ASSERT_EQUAL_STRING("LoRaGateway", doc["dev"]["via_device"].as<const char*>());
-    // Node devices carry the gateway firmware's version (they have none of
-    // their own in the payload contract) so a discovery-schema change is
-    // traceable from HA -- see kFirmwareVersion's comment.
-    TEST_ASSERT_EQUAL_STRING(kFirmwareVersion, doc["dev"]["sw"].as<const char*>());
+    // Node devices deliberately carry no "sw" field: a sensor node's own
+    // firmware version isn't part of the payload contract, and stamping the
+    // gateway's own version there instead was actively misleading (see the
+    // comment above kRestartCommandPayload in payload_parser.h).
+    TEST_ASSERT_FALSE(doc["dev"].containsKey("sw"));
 }
 
 static void test_build_gateway_discovery_messages_covers_diagnostics(void) {
@@ -406,7 +407,11 @@ static void test_build_gateway_discovery_messages_covers_diagnostics(void) {
     TEST_ASSERT_EQUAL_STRING("{{ value_json.uptime_s }}", doc["val_tpl"].as<const char*>());
     TEST_ASSERT_EQUAL_STRING("s", doc["unit_of_meas"].as<const char*>());
     TEST_ASSERT_EQUAL_STRING("duration", doc["dev_cla"].as<const char*>());
-    TEST_ASSERT_EQUAL_STRING(kFirmwareVersion, doc["dev"]["sw"].as<const char*>());
+    // The exact value is the build's git hash (or "dev" for this native test
+    // env -- see platformio.ini/GATEWAY_FW_VERSION's comment), which isn't
+    // knowable at test-write time; just confirm the field is populated.
+    TEST_ASSERT_TRUE(doc["dev"]["sw"].is<const char*>());
+    TEST_ASSERT_TRUE(strlen(doc["dev"]["sw"].as<const char*>()) > 0);
 }
 
 static void test_build_gateway_command_discovery_messages_covers_restart_button(void) {
@@ -424,7 +429,10 @@ static void test_build_gateway_command_discovery_messages_covers_restart_button(
     TEST_ASSERT_EQUAL_STRING("restart", doc["dev_cla"].as<const char*>());
     TEST_ASSERT_EQUAL_STRING("config", doc["ent_cat"].as<const char*>());
     TEST_ASSERT_EQUAL_STRING("lora/incoming/gateway/status", doc["avty_t"].as<const char*>());
-    TEST_ASSERT_EQUAL_STRING(kFirmwareVersion, doc["dev"]["sw"].as<const char*>());
+    // Same reasoning as the diagnostics test above: the exact value is the
+    // build's git hash (or "dev" in this native env), not knowable here.
+    TEST_ASSERT_TRUE(doc["dev"]["sw"].is<const char*>());
+    TEST_ASSERT_TRUE(strlen(doc["dev"]["sw"].as<const char*>()) > 0);
 }
 
 namespace {

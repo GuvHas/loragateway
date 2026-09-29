@@ -191,15 +191,16 @@ struct GatewayStats {
     unsigned long packetsDropped = 0;
 };
 
-// Gateway firmware version, embedded as "sw" in every discovery message's
-// device block -- both the gateway's own HA device page and every per-node
-// device page (registered by an instance of this firmware), so a firmware
-// upgrade that changes the discovery schema is traceable from HA. A sensor
-// node's own firmware version isn't part of the payload contract
-// (SensorReading carries none), so a node's "sw" reflects the gateway that
-// discovered it, not the sensor node's own firmware -- documented at the
-// call site in buildEntityDiscovery().
-constexpr const char* kFirmwareVersion = "1.1.0";
+// The gateway's own firmware version, embedded as "sw" in its HA discovery
+// device block (see buildGatewayDiscoveryMessages() and
+// buildGatewayCommandDiscoveryMessages() in payload_parser.cpp), is the
+// GATEWAY_FW_VERSION preprocessor macro -- the current git short hash,
+// injected at build time by scripts/inject_git_version.py (see
+// platformio.ini), not a hand-maintained constant here. Per-node discovery
+// deliberately has no "sw" field at all: a sensor node's own firmware
+// version isn't part of the payload contract, and stamping the gateway's
+// version there instead was actively misleading (two nodes running
+// different firmware would both show the gateway's version).
 
 // Payload the gateway's restart button (buildGatewayCommandDiscoveryMessages)
 // publishes on press, and the only payload GatewayOrchestrator's restart
