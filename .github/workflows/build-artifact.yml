@@ -35,7 +35,7 @@ jobs:
         run: pio run -e ttgo-lora32-v21
 
       - name: Upload firmware binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: firmware-${{ github.sha }}
           path: .pio/build/ttgo-lora32-v21/firmware.bin
