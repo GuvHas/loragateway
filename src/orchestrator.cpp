@@ -81,6 +81,11 @@ bool GatewayOrchestrator::removeNode(const std::string& id) {
     store_.saveAllowListCsv(allowList_.toCsv());
     discoveredNodes_.erase(id);
     pendingDiscoveryCount_.erase(id);
+    // A removed id can later be re-approved for a physically different node
+    // (a relabeled or replacement device); it should get a clean discovery
+    // rather than inheriting whatever firmware version the old device last
+    // reported under this id.
+    swVersionByNode_.erase(id);
     return true;
 }
 
@@ -245,8 +250,31 @@ void GatewayOrchestrator::ingestOnePacket(const RawPacket& packet) {
     }
 
     bool discoveryInFlight = pendingDiscoveryCount_.find(reading.id) != pendingDiscoveryCount_.end();
-    if (discoveredNodes_.find(reading.id) == discoveredNodes_.end() && !discoveryInFlight) {
-        auto discoveryMsgs = buildAutoDiscoveryMessages(reading.id, identity());
+    bool isFirstDiscovery = discoveredNodes_.find(reading.id) == discoveredNodes_.end() && !discoveryInFlight;
+
+    // "sw" only arrives on a node's cold-boot packet (see
+    // SensorReading::swVersion); most packets carry no "sw" at all, and that
+    // must leave whatever's already known untouched -- an absent optional
+    // here means "nothing new to report", never "clear it". Only a value
+    // that's actually different from what's stored (a real flash/battery-swap
+    // cold boot, not a retransmitted cold-boot packet) is worth republishing
+    // discovery over.
+    auto swIt = swVersionByNode_.find(reading.id);
+    std::string knownSw = swIt != swVersionByNode_.end() ? swIt->second : "";
+    bool swChanged = reading.swVersion.has_value() && *reading.swVersion != knownSw;
+    if (swChanged) {
+        swVersionByNode_[reading.id] = *reading.swVersion;
+        knownSw = *reading.swVersion;
+    }
+
+    // Rebuild and (re-)publish this node's full discovery set on first sight,
+    // or when its known "sw" just changed -- but not both at once, and not
+    // while a previous discovery attempt for this node is still draining out
+    // of the queue: overwriting pendingDiscoveryCount_[reading.id] mid-flight
+    // would desync it from the enqueued-but-not-yet-published messages still
+    // counting down against the old value (see onMessagePublished()).
+    if (isFirstDiscovery || (swChanged && !discoveryInFlight)) {
+        auto discoveryMsgs = buildAutoDiscoveryMessages(reading.id, identity(), knownSw);
         pendingDiscoveryCount_[reading.id] = discoveryMsgs.size();
         for (const auto& msg : discoveryMsgs) {
             enqueueOrPublish(msg, true, reading.id);

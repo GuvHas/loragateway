@@ -482,6 +482,139 @@ static void test_duplicate_is_not_shown_on_display_or_logged(void) {
 }
 
 // ---------------------------------------------------------------------
+// Cold-boot node firmware versioning: a node only sends "sw" on its
+// cold-boot packet (see SensorReading::swVersion), and the gateway must
+// remember it and re-publish that node's discovery so Home Assistant shows
+// the real version -- but only when it actually changes, never erasing it
+// just because a later packet has no "sw" at all.
+// ---------------------------------------------------------------------
+
+static void test_cold_boot_sw_version_is_included_in_initial_discovery(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    // This node's very first packet is itself a cold boot (boot:0) carrying "sw".
+    loRa.push(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":0,"seq":0,"sw":"a1b2c3d"})");
+    orchestrator.tick();
+
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // 8 discovery + 1 state
+    for (size_t i = 0; i < 8; ++i) {
+        TEST_ASSERT_TRUE(mqtt.published[i].payload.find("\"a1b2c3d\"") != std::string::npos);
+    }
+}
+
+static void test_new_sw_version_triggers_discovery_republish(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    // First packet ever, no "sw" (an already-running node that predates this
+    // feature, or simply lost its very first cold-boot transmission).
+    loRa.push(kKitchenSuccessPayload); // boot:12, seq:10, no "sw"
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // 8 discovery + 1 state
+
+    // A later reboot (battery swap / reflash): higher bootCount resets seq,
+    // and this cold-boot packet now carries "sw" for the first time.
+    loRa.push(R"({"id":"kitchen","t":21.0,"h":44.0,"v":4.1,"boot":13,"seq":0,"sw":"a1b2c3d"})");
+    orchestrator.tick();
+
+    // 8 fresh discovery messages + 1 state message on top of the first batch.
+    TEST_ASSERT_EQUAL_UINT32(18, mqtt.published.size());
+    for (size_t i = 9; i < 17; ++i) {
+        TEST_ASSERT_TRUE(mqtt.published[i].payload.find("\"a1b2c3d\"") != std::string::npos);
+    }
+}
+
+static void test_subsequent_packets_without_sw_do_not_erase_stored_version(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    // Cold boot carrying "sw": initial discovery already includes it.
+    loRa.push(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":0,"seq":0,"sw":"a1b2c3d"})");
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+
+    // Every subsequent packet (bootCount unchanged) omits "sw" entirely, as
+    // real nodes do to save airtime/battery -- must not trigger another
+    // discovery republish, and must not clear the version already known.
+    loRa.push(R"({"id":"kitchen","t":22.6,"h":45.1,"v":4.1,"boot":0,"seq":1})");
+    orchestrator.tick();
+    loRa.push(R"({"id":"kitchen","t":22.7,"h":45.2,"v":4.1,"boot":0,"seq":2})");
+    orchestrator.tick();
+
+    // Only the two state messages were added -- no extra discovery batch.
+    TEST_ASSERT_EQUAL_UINT32(11, mqtt.published.size());
+
+    // A later reboot reporting the *same* "sw" it already told the gateway.
+    // If the sw-less packets above had wrongly cleared the stored version,
+    // this would look like a brand-new value (empty -> "a1b2c3d") and
+    // wrongly fire a full discovery republish; it must not, proving the
+    // stored version survived the sw-less packets untouched.
+    loRa.push(R"({"id":"kitchen","t":21.0,"h":44.0,"v":4.1,"boot":1,"seq":0,"sw":"a1b2c3d"})");
+    orchestrator.tick();
+
+    TEST_ASSERT_EQUAL_UINT32(12, mqtt.published.size()); // one more state message only
+}
+
+static void test_same_sw_version_again_does_not_retrigger_discovery(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    loRa.push(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":0,"seq":0,"sw":"a1b2c3d"})");
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+
+    // Another cold-boot packet reporting the *same* version it already told
+    // the gateway (e.g. a brown-out reboot on unchanged firmware) must not
+    // re-send discovery -- nothing about the node's HA representation needs
+    // to change.
+    loRa.push(R"({"id":"kitchen","t":21.0,"h":44.0,"v":4.1,"boot":1,"seq":0,"sw":"a1b2c3d"})");
+    orchestrator.tick();
+
+    TEST_ASSERT_EQUAL_UINT32(10, mqtt.published.size()); // one more state message only
+}
+
+// ---------------------------------------------------------------------
 // MQTT disconnect handling: queue while offline, respect backoff, flush
 // on reconnect.
 // ---------------------------------------------------------------------
@@ -936,6 +1069,11 @@ int main(int argc, char** argv) {
     RUN_TEST(test_reboot_resets_dedup_even_with_lower_seq);
     RUN_TEST(test_dedup_is_bypassed_when_payload_has_no_seq_field);
     RUN_TEST(test_duplicate_is_not_shown_on_display_or_logged);
+
+    RUN_TEST(test_cold_boot_sw_version_is_included_in_initial_discovery);
+    RUN_TEST(test_new_sw_version_triggers_discovery_republish);
+    RUN_TEST(test_subsequent_packets_without_sw_do_not_erase_stored_version);
+    RUN_TEST(test_same_sw_version_again_does_not_retrigger_discovery);
 
     RUN_TEST(test_offline_packets_are_queued_not_lost);
     RUN_TEST(test_reconnect_backoff_is_respected_then_flushes_queue);

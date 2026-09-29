@@ -73,6 +73,26 @@ static void test_parse_defaults_when_optional_fields_missing(void) {
     TEST_ASSERT_FALSE(result.reading.hasSeq);
     TEST_ASSERT_FALSE(result.reading.lowBattery);
     TEST_ASSERT_EQUAL_STRING("none", result.reading.rawErr.c_str());
+    // No "sw" in the payload at all -- the overwhelmingly common case, since
+    // nodes only send it on a cold-boot packet.
+    TEST_ASSERT_FALSE(result.reading.swVersion.has_value());
+}
+
+// A node only sends "sw" on its cold-boot packet (bootCount == 0), to avoid
+// spending airtime/battery repeating a value that can't have changed since
+// the last transmission from an already-running node.
+static void test_parse_cold_boot_sw_field_is_captured(void) {
+    ParseResult result =
+        parseSensorPayload(std::string(R"({"id":"kitchen","boot":0,"seq":0,"sw":"a1b2c3d"})"));
+
+    TEST_ASSERT_TRUE(result.ok());
+    TEST_ASSERT_TRUE(result.reading.swVersion.has_value());
+    TEST_ASSERT_EQUAL_STRING("a1b2c3d", result.reading.swVersion->c_str());
+}
+
+static void test_parse_sw_wrong_type_is_rejected(void) {
+    ParseResult result = parseSensorPayload(std::string(R"({"id":"n1","sw":123})"));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ParseError::WrongType), static_cast<int>(result.error));
 }
 
 static void test_parse_empty_string_is_invalid_json(void) {
@@ -393,6 +413,22 @@ static void test_build_auto_discovery_messages_covers_all_entities(void) {
     TEST_ASSERT_TRUE(doc["dev"]["sw"].isNull());
 }
 
+// Once GatewayOrchestrator has learned a node's real firmware version (from
+// a cold-boot packet's "sw" field), it re-publishes discovery with that
+// version threaded through instead of null.
+static void test_build_auto_discovery_messages_includes_known_sw_version(void) {
+    GatewayIdentity gateway{"LoRaGateway", "lora/incoming"};
+    std::vector<MqttMessage> messages = buildAutoDiscoveryMessages("kitchen", gateway, "a1b2c3d");
+
+    TEST_ASSERT_EQUAL_UINT32(8, messages.size());
+
+    StaticJsonDocument<1024> doc;
+    DeserializationError err = deserializeJson(doc, messages[0].payload);
+    TEST_ASSERT_FALSE(err);
+    TEST_ASSERT_FALSE(doc["dev"]["sw"].isNull());
+    TEST_ASSERT_EQUAL_STRING("a1b2c3d", doc["dev"]["sw"].as<const char*>());
+}
+
 static void test_build_gateway_discovery_messages_covers_diagnostics(void) {
     GatewayIdentity gateway{"LoRaGateway", "lora/incoming"};
     std::vector<MqttMessage> messages = buildGatewayDiscoveryMessages(gateway);
@@ -517,6 +553,8 @@ int main(int argc, char** argv) {
     RUN_TEST(test_parse_dht_failure_payload_keeps_t_and_h_null);
     RUN_TEST(test_parse_low_battery_payload);
     RUN_TEST(test_parse_defaults_when_optional_fields_missing);
+    RUN_TEST(test_parse_cold_boot_sw_field_is_captured);
+    RUN_TEST(test_parse_sw_wrong_type_is_rejected);
 
     RUN_TEST(test_parse_empty_string_is_invalid_json);
     RUN_TEST(test_parse_truncated_json_is_invalid_json);
@@ -562,6 +600,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_gateway_command_topic_format);
     RUN_TEST(test_build_sensor_state_message_preserves_null_readings);
     RUN_TEST(test_build_auto_discovery_messages_covers_all_entities);
+    RUN_TEST(test_build_auto_discovery_messages_includes_known_sw_version);
     RUN_TEST(test_build_gateway_discovery_messages_covers_diagnostics);
     RUN_TEST(test_build_gateway_command_discovery_messages_covers_restart_button);
     RUN_TEST(test_build_auto_discovery_messages_sanitizes_ha_illegal_characters);

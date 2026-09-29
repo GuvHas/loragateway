@@ -291,6 +291,20 @@ ParseResult parseSensorPayload(const char* json, size_t length) {
         reading.err = parseSensorError(reading.rawErr);
     }
 
+    // Optional: only a node's cold-boot packet is expected to carry this
+    // (see SensorReading::swVersion), but nothing here enforces that -- the
+    // gateway trusts whatever bootCount/seq accompany it, same as every
+    // other field on this unauthenticated link.
+    if (obj.containsKey("sw")) {
+        JsonVariantConst swVar = obj["sw"];
+        if (!swVar.is<const char*>()) {
+            result.error = ParseError::WrongType;
+            return result;
+        }
+        const char* rawSwPtr = swVar.as<const char*>();
+        reading.swVersion = rawSwPtr ? std::string(rawSwPtr) : std::string();
+    }
+
     result.reading = reading;
     return result;
 }
@@ -406,7 +420,8 @@ MqttMessage buildEntityDiscovery(const std::string& component,
                                   const std::string& devClass,
                                   const GatewayIdentity& gateway,
                                   const std::string& entCat = "",
-                                  int precision = -1) {
+                                  int precision = -1,
+                                  const std::string& swVersion = "") {
     // stateTopic must exactly match the topic decideRoute() actually
     // publishes readings to (which only guarantees MQTT-safety, not HA's
     // stricter discovery-topic charset) -- so it stays on the plain
@@ -436,22 +451,31 @@ MqttMessage buildEntityDiscovery(const std::string& component,
     dev["mdl"] = "LoRa Sensor Node";
     dev["mf"] = "DIY";
     dev["via_device"] = gateway.deviceName;
-    // Explicit JSON null, not simply omitted (Codex review): Home Assistant
-    // merges device-info fields across the several discovery configs that
-    // share one device id (its own discovery docs describe this), which
-    // only works if an *omitted* field means "leave whatever's already
-    // there" -- so a node already discovered under earlier firmware (like
-    // this gateway's own kFirmwareVersion-era releases) would keep showing
-    // that stale version forever if this key just vanished from later
-    // updates. An explicit null instead asks HA to clear it, the same
-    // "no value" idiom this file already uses for missing sensor readings
-    // (see doc["t"]/doc["h"]/doc["v"] above). A sensor node's own firmware
-    // version isn't part of the payload contract in the first place (nodes
-    // have no OTA path -- they're battery-powered and physically remote),
-    // and stamping the *gateway's* version here instead was actively
-    // misleading: two nodes on genuinely different firmware both showed the
-    // same "sw", looking like they were running identical firmware.
-    dev["sw"] = nullptr;
+    // Explicit JSON null when the node's actual version isn't known yet, not
+    // simply omitted (Codex review on PR #22): Home Assistant merges
+    // device-info fields across the several discovery configs that share one
+    // device id (its own discovery docs describe this), which only works if
+    // an *omitted* field means "leave whatever's already there" -- so a node
+    // already discovered without a known version would keep showing a stale
+    // one forever if this key just vanished from a later update. An explicit
+    // null instead asks HA to clear it, the same "no value" idiom this file
+    // already uses for missing sensor readings (see doc["t"]/doc["h"]/
+    // doc["v"] above). Once a real version is known (a node's cold-boot
+    // packet carried "sw" -- see SensorReading::swVersion and
+    // GatewayOrchestrator's swVersionByNode_), it's threaded through here
+    // instead: a sensor node's own firmware version was never part of the
+    // steady-state payload contract (nodes have no OTA path -- they're
+    // battery-powered and physically remote -- and re-sending a static
+    // string on every packet would waste airtime/battery for nothing), and
+    // stamping the *gateway's* version here instead, as this file used to,
+    // was actively misleading: two nodes on genuinely different firmware
+    // both showed the same "sw", looking like they were running identical
+    // firmware.
+    if (!swVersion.empty()) {
+        dev["sw"] = swVersion;
+    } else {
+        dev["sw"] = nullptr;
+    }
 
     MqttMessage msg;
     msg.topic = "homeassistant/" + component + "/lora_" + haId + "_" + suffix + "/config";
@@ -462,28 +486,33 @@ MqttMessage buildEntityDiscovery(const std::string& component,
 } // namespace
 
 std::vector<MqttMessage> buildAutoDiscoveryMessages(const std::string& nodeId,
-                                                     const GatewayIdentity& gateway) {
+                                                     const GatewayIdentity& gateway,
+                                                     const std::string& swVersion) {
     std::vector<MqttMessage> messages;
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "t", "Temperature",
-                                             "{{ value_json.t }}", "°C", "temperature", gateway));
+                                             "{{ value_json.t }}", "°C", "temperature", gateway, "", -1,
+                                             swVersion));
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "h", "Humidity",
-                                             "{{ value_json.h }}", "%", "humidity", gateway));
+                                             "{{ value_json.h }}", "%", "humidity", gateway, "", -1,
+                                             swVersion));
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "v", "Battery",
-                                             "{{ value_json.v }}", "V", "voltage", gateway, "", 2));
+                                             "{{ value_json.v }}", "V", "voltage", gateway, "", 2, swVersion));
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "r", "Signal",
-                                             "{{ value_json.rssi }}", "dBm", "signal_strength", gateway));
+                                             "{{ value_json.rssi }}", "dBm", "signal_strength", gateway, "",
+                                             -1, swVersion));
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "boot", "Boot Count",
                                              "{{ value_json.boot | default(0) }}", "restarts", "",
-                                             gateway, "diagnostic"));
+                                             gateway, "diagnostic", -1, swVersion));
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "seq", "Sequence",
                                              "{{ value_json.seq | default(0) }}", "", "",
-                                             gateway, "diagnostic"));
+                                             gateway, "diagnostic", -1, swVersion));
     messages.push_back(buildEntityDiscovery(
         "binary_sensor", nodeId, "lb", "Low Battery",
-        "{{ 'ON' if value_json.lb is defined and value_json.lb == 1 else 'OFF' }}", "", "battery", gateway));
+        "{{ 'ON' if value_json.lb is defined and value_json.lb == 1 else 'OFF' }}", "", "battery", gateway,
+        "", -1, swVersion));
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "err", "Error",
                                              "{{ value_json.err | default('none', true) }}", "", "",
-                                             gateway, "diagnostic"));
+                                             gateway, "diagnostic", -1, swVersion));
     return messages;
 }
 

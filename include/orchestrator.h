@@ -151,6 +151,14 @@ private:
     };
     std::map<std::string, LastSeen> lastSeenByNode_;
 
+    // Node id -> last "sw" value that node actually reported (see
+    // SensorReading::swVersion). A node only sends "sw" on its cold-boot
+    // packet to avoid wasting airtime/battery, so most packets carry no "sw"
+    // at all -- that must leave whatever's here untouched, not erase it.
+    // Absent from this map means "never reported", which discovery renders
+    // as an explicit JSON null (see buildAutoDiscoveryMessages()).
+    std::map<std::string, std::string> swVersionByNode_;
+
     std::deque<QueuedMessage> outboundQueue_;
 
     unsigned long packetsReceived_ = 0;
