@@ -188,6 +188,22 @@ gateway::GatewayIdentity currentGatewayIdentity() {
   return gateway::GatewayIdentity{std::string(device_name), std::string(mqtt_topic)};
 }
 
+// "1d 2h 3m 4s"-style formatting for the /devices live-metrics panel;
+// omits leading zero units (e.g. "45s" alone once uptime is under a minute).
+String formatUptime(unsigned long totalSeconds) {
+  unsigned long days = totalSeconds / 86400;
+  unsigned long hours = (totalSeconds % 86400) / 3600;
+  unsigned long minutes = (totalSeconds % 3600) / 60;
+  unsigned long seconds = totalSeconds % 60;
+
+  String out;
+  if (days > 0) out += String(days) + "d ";
+  if (days > 0 || hours > 0) out += String(hours) + "h ";
+  if (days > 0 || hours > 0 || minutes > 0) out += String(minutes) + "m ";
+  out += String(seconds) + "s";
+  return out;
+}
+
 // ==========================================
 //         DEVICE MANAGEMENT WEB PAGE
 // ==========================================
@@ -200,11 +216,24 @@ void handleDevicesPage() {
   html += ".dev{display:flex;justify-content:space-between;align-items:center;padding:10px;margin:5px 0;background:#16213e;border-radius:6px;}";
   html += ".dev .name{font-size:1.1em;font-weight:bold;}";
   html += ".btn{padding:8px 16px;border:none;border-radius:4px;cursor:pointer;font-size:0.9em;text-decoration:none;color:#fff;}";
-  html += ".approve{background:#27ae60;}.remove{background:#c0392b;}";
+  html += ".approve{background:#27ae60;}.remove{background:#c0392b;}.clear{background:#2980b9;}";
   html += ".none{color:#666;font-style:italic;padding:10px;}";
   html += "a.back{color:#0fbcf9;display:inline-block;margin-top:15px;}";
   html += "</style></head><body>";
   html += "<h1>Device Management</h1>";
+
+  // --- Live gateway metrics ---
+  html += "<h2>Gateway Status</h2>";
+  html += "<div class='dev'><span class='name'>Uptime</span><span>" + formatUptime(millis() / 1000) +
+          "</span></div>";
+  html += "<div class='dev'><span class='name'>WiFi RSSI</span><span>" + String(WiFi.RSSI()) +
+          " dBm</span></div>";
+  html += "<div class='dev'><span class='name'>Queue Depth</span><span>" +
+          String(orchestrator.queuedMessageCount()) + "</span></div>";
+  html += "<div class='dev'><span class='name'>Packets Dropped</span><span>" +
+          String(orchestrator.droppedMessageCount()) + "</span></div>";
+  html += "<div class='dev'><span class='name'>Discovered Nodes</span>";
+  html += "<a class='btn clear' href='/clear-discovered'>Clear Discovered Nodes</a></div>";
 
   // --- Pending (unapproved) nodes ---
   // Node ids come from unauthenticated LoRa packets. Display text is
@@ -256,6 +285,16 @@ void handleRemove() {
   if (wm.server->hasArg("id")) {
     orchestrator.removeNode(wm.server->arg("id").c_str());
   }
+  wm.server->sendHeader("Location", "/devices", true);
+  wm.server->send(302, "text/plain", "Redirecting...");
+}
+
+// Forces every node to re-run Home Assistant auto-discovery on its next
+// packet (see GatewayOrchestrator::clearDiscoveredNodes()). Does not touch
+// the allowlist -- approved nodes stay approved, this only clears the
+// "already discovered" bookkeeping.
+void handleClearDiscovered() {
+  orchestrator.clearDiscoveredNodes();
   wm.server->sendHeader("Location", "/devices", true);
   wm.server->send(302, "text/plain", "Redirecting...");
 }
@@ -413,6 +452,7 @@ void setup() {
   wm.server->on("/devices", handleDevicesPage);
   wm.server->on("/approve", handleApprove);
   wm.server->on("/remove",  handleRemove);
+  wm.server->on("/clear-discovered", handleClearDiscovered);
 
   client.setServer(mqtt_server, atoi(mqtt_port));
   client.setBufferSize(MQTT_BUFFER_SIZE);

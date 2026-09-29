@@ -210,6 +210,34 @@ void GatewayOrchestrator::ingestLoRaPacket() {
         }
     }
 
+    // Deduplicate retransmissions: track the highest (bootCount, seq)
+    // accepted per node and drop anything that isn't strictly newer, except
+    // that a higher bootCount (a reboot) always resets the check, since a
+    // rebooted node's own seq counter restarts at 0 and would otherwise look
+    // like an endless stream of "already seen" values.
+    //
+    // Skipped entirely when the payload has no "seq" (reading.hasSeq is
+    // false): bootCount/seq then just default to 0 on every single packet
+    // (see SensorReading::hasSeq), which would otherwise make every packet
+    // after this node's first look like a duplicate of (0, 0) forever.
+    bool isDuplicate = false;
+    if (reading.hasSeq) {
+        auto seenIt = lastSeenByNode_.find(reading.id);
+        if (seenIt == lastSeenByNode_.end()) {
+            lastSeenByNode_[reading.id] = LastSeen{reading.bootCount, reading.seq};
+        } else if (reading.bootCount > seenIt->second.bootCount) {
+            seenIt->second = LastSeen{reading.bootCount, reading.seq};
+        } else if (reading.bootCount == seenIt->second.bootCount && reading.seq > seenIt->second.seq) {
+            seenIt->second.seq = reading.seq;
+        } else {
+            // Same-or-earlier seq within the same boot (a retransmission), or
+            // a bootCount that went backwards (untrusted input over an
+            // unauthenticated LoRa link) -- either way, already seen.
+            isDuplicate = true;
+        }
+    }
+    if (isDuplicate) return;
+
     MqttMessage stateMsg = buildSensorStateMessage(reading, packet.rssi, route.topic);
     if (onPacketForwarded_) onPacketForwarded_(stateMsg.topic, stateMsg.payload);
     enqueueOrPublish(stateMsg, false);
