@@ -12,13 +12,23 @@ Every push to `main` automatically builds the firmware and attaches it as a
 downloadable artifact — no local PlatformIO setup needed to get a flashable
 binary. The badge above shows whether the latest build succeeded.
 
+**This is an application-image update, not a full/blank-chip flash.** The
+artifact contains only `firmware.bin` — no bootloader or partition-table
+binaries — so it only works on a board that already has this project's
+bootloader and partition layout on it (e.g. one that's ever been flashed via
+`pio run -e ttgo-lora32-v21 -t upload`, which writes all three at first
+flash). Setting up a brand-new/erased board still needs that full PlatformIO
+upload once; after that, this artifact can be used for updates.
+
 1. Open the [`build-artifact.yml` workflow runs page](https://github.com/GuvHas/loragateway/actions/workflows/build-artifact.yml).
 2. Click the topmost run (it's the latest build off `main`; a green check
    means it succeeded).
 3. Scroll down to the **Artifacts** section at the bottom of the run page.
 4. Download the `firmware-<commit-sha>` zip and unzip it — it contains
-   `firmware.bin`, ready to flash to your ESP32 (e.g. via `esptool.py` or
-   the PlatformIO upload tools).
+   `firmware.bin`. Flash it at the application offset (`0x10000` on this
+   board) with `esptool.py --chip esp32 write_flash 0x10000 firmware.bin`,
+   or drop it in place of `.pio/build/ttgo-lora32-v21/firmware.bin` and run
+   the PlatformIO upload tools.
 
 Note: downloading workflow artifacts requires being signed in to GitHub, since
 that's a GitHub-wide restriction on Actions artifacts, not something this repo
