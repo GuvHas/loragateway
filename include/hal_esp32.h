@@ -12,6 +12,10 @@
 #include <Preferences.h>
 #include "SSD1306.h"
 
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+
 #include "hal.h"
 
 namespace gateway {
@@ -23,10 +27,73 @@ public:
     void reconnect() override;
 };
 
-// Wraps the global `LoRa` singleton (sandeepmistry/LoRa).
+// Wraps the global `LoRa` singleton (sandeepmistry/LoRa), receiving packets
+// via the SX1276's DIO0 interrupt instead of polling LoRa.parsePacket() from
+// loop(). Polling only checks for a packet once per loop() iteration, so a
+// packet arriving while loop() is stuck in blocking network/socket I/O (e.g.
+// PubSubClient::connect() against an unreachable broker) would simply be
+// missed -- the SX1276's own FIFO doesn't buffer a second packet on top of
+// an undrained one. The interrupt handler drains the FIFO into a small
+// fixed-size ring buffer the moment DIO0 fires, independent of what loop()
+// is doing; receive() (called from GatewayOrchestrator::tick(), see
+// orchestrator.cpp) then just drains that ring buffer.
 class Esp32LoRaReceiver : public ILoRaReceiver {
 public:
+    Esp32LoRaReceiver();
+
+    // Attaches the DIO0 interrupt and puts the radio into continuous-receive
+    // mode. Call once from setup(), after LoRa.begin()/setSpreadingFactor()/
+    // enableCrc() have already configured the radio -- this only changes the
+    // receive strategy, not the radio parameters.
+    void begin();
+
     bool receive(RawPacket& out) override;
+
+    // Packets the ISR had to drop because the ring buffer was still full
+    // (receive() wasn't being drained fast enough to keep up with arrivals).
+    // Exposed for diagnostics; stays 0 in normal operation since the buffer
+    // is drained every orchestrator tick().
+    uint32_t droppedByIsr() const { return droppedByIsr_.load(std::memory_order_relaxed); }
+
+private:
+    // Sized well above what a single orchestrator tick() could plausibly
+    // need to absorb (a LoRa packet's airtime alone is tens of
+    // milliseconds, so packets can't physically arrive faster than that) --
+    // this is headroom for a slow tick() (e.g. a blocked MQTT call), not a
+    // steady-state queue depth.
+    static constexpr size_t kRingCapacity = 8;
+    static constexpr size_t kMaxPacketBytes = 255; // LoRa's max payload size
+
+    struct IsrPacket {
+        uint8_t data[kMaxPacketBytes];
+        size_t length = 0;
+        int rssi = 0;
+    };
+
+    // Invoked directly from the LoRa library's DIO0 interrupt handler (see
+    // LoRa.onReceive() in begin()). Must stay fast and allocation-free: it
+    // only copies bytes already latched in the SX1276's FIFO into a
+    // fixed-size ring buffer slot via LoRa.available()/read()/packetRssi()
+    // -- no heap allocation, no logging, no blocking.
+    void IRAM_ATTR onDio0Receive(int packetSize);
+
+    // LoRa.onReceive() takes a plain function pointer with no user-data
+    // parameter, so it can't bind directly to a non-static member function.
+    // There is exactly one Esp32LoRaReceiver instance in this firmware (see
+    // main.cpp's global objects), so a single static pointer is sufficient.
+    static Esp32LoRaReceiver* instance_;
+    static void IRAM_ATTR handleDio0ReceiveTrampoline(int packetSize);
+
+    IsrPacket ring_[kRingCapacity];
+    // Single-producer (the ISR)/single-consumer (receive(), called from
+    // loop() via GatewayOrchestrator::tick()) index pair: only the ISR ever
+    // writes head_, only receive() ever writes tail_, and each side only
+    // *reads* the other's index -- so no lock is needed, just the
+    // acquire/release ordering used in the .cpp to make sure a slot's data
+    // is fully written before its index becomes visible to the other side.
+    std::atomic<size_t> head_{0};
+    std::atomic<size_t> tail_{0};
+    std::atomic<uint32_t> droppedByIsr_{0};
 };
 
 // Wraps a PubSubClient. `configure()` must be called (and re-called after

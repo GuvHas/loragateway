@@ -79,6 +79,79 @@ static void test_happy_path_publishes_discovery_and_state(void) {
     TEST_ASSERT_EQUAL_UINT32(10, mqtt.published.size());
 }
 
+// A single tick() must drain every packet the HAL currently has buffered,
+// not just one -- this is what actually delivers on interrupt-driven LoRa
+// receive's promise (see Esp32LoRaReceiver's ring buffer in hal_esp32.h): a
+// burst that arrived while tick() was busy elsewhere must be fully caught up
+// on the very next tick(), not trickled out one packet per loop() iteration.
+static void test_tick_drains_all_queued_lora_packets_in_one_call(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen,garage,bedroom");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    // Three packets from three different nodes, all queued on the HAL side
+    // before a single tick() call.
+    loRa.push(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":12,"seq":10,"lb":0,"err":"none"})");
+    loRa.push(R"({"id":"garage","t":18.0,"h":50.0,"v":4.0,"boot":1,"seq":1,"lb":0,"err":"none"})");
+    loRa.push(R"({"id":"bedroom","t":21.0,"h":40.0,"v":4.2,"boot":3,"seq":5,"lb":0,"err":"none"})");
+
+    orchestrator.tick(); // must drain all three, not just the first
+
+    TEST_ASSERT_EQUAL_UINT32(3, orchestrator.packetsReceived());
+    // 8 discovery + 1 state message per node, for all 3 nodes.
+    TEST_ASSERT_EQUAL_UINT32(27, mqtt.published.size());
+}
+
+// Codex review (P2): draining "until the buffer reports empty" has no
+// guaranteed termination if the producer (an ISR on real hardware) keeps
+// refilling as fast as tick() drains -- that would starve WiFi/OTA
+// housekeeping and the watchdog reset, eventually rebooting the gateway.
+// tick() must therefore process at most kMaxPacketsPerTick packets per call,
+// even when more are already available, catching up over subsequent ticks.
+static void test_tick_caps_packets_drained_per_call(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    // Prime discovery so every later packet only contributes one message,
+    // isolating this test to the per-tick packet-count cap alone.
+    loRa.push(kKitchenSuccessPayload); // seq 10
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // 8 discovery + 1 state
+
+    // Queue more packets than the per-tick budget allows.
+    const size_t kExtra = gateway::GatewayOrchestrator::kMaxPacketsPerTick + 5;
+    for (size_t i = 0; i < kExtra; ++i) {
+        std::string payload = std::string(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":12,"seq":)") +
+                               std::to_string(11 + i) + R"(,"lb":0,"err":"none"})";
+        loRa.push(payload);
+    }
+
+    orchestrator.tick(); // must NOT drain all of kExtra in one call
+    TEST_ASSERT_EQUAL_UINT32(9 + gateway::GatewayOrchestrator::kMaxPacketsPerTick, mqtt.published.size());
+
+    orchestrator.tick(); // catches up on the remaining 5 next tick
+    TEST_ASSERT_EQUAL_UINT32(9 + kExtra, mqtt.published.size());
+}
+
 // ---------------------------------------------------------------------
 // OLED gets a curated summary, not the raw JSON (the JSON either wraps
 // illegibly across a 128x64 screen or gets truncated to something
@@ -681,6 +754,8 @@ int main(int argc, char** argv) {
     UNITY_BEGIN();
 
     RUN_TEST(test_happy_path_publishes_discovery_and_state);
+    RUN_TEST(test_tick_drains_all_queued_lora_packets_in_one_call);
+    RUN_TEST(test_tick_caps_packets_drained_per_call);
     RUN_TEST(test_forwarded_packet_shows_curated_summary_not_raw_json);
     RUN_TEST(test_forwarded_summary_flags_low_battery_and_dht_error);
     RUN_TEST(test_packet_forwarded_callback_receives_full_json_payload);
