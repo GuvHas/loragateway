@@ -1,8 +1,28 @@
 # LoRa to MQTT Gateway
 
+[![Build Firmware Artifact](https://github.com/GuvHas/loragateway/actions/workflows/build-artifact.yml/badge.svg)](https://github.com/GuvHas/loragateway/actions/workflows/build-artifact.yml)
+
 An ESP32 (TTGO LoRa32) gateway that receives JSON sensor readings over LoRa
 and publishes them to MQTT with Home Assistant MQTT-discovery, so each node
 shows up automatically as a device with its own sensors.
+
+## Download Latest Firmware
+
+Every push to `main` automatically builds the firmware and attaches it as a
+downloadable artifact — no local PlatformIO setup needed to get a flashable
+binary. The badge above shows whether the latest build succeeded.
+
+1. Open the [`build-artifact.yml` workflow runs page](https://github.com/GuvHas/loragateway/actions/workflows/build-artifact.yml).
+2. Click the topmost run (it's the latest build off `main`; a green check
+   means it succeeded).
+3. Scroll down to the **Artifacts** section at the bottom of the run page.
+4. Download the `firmware-<commit-sha>` zip and unzip it — it contains
+   `firmware.bin`, ready to flash to your ESP32 (e.g. via `esptool.py` or
+   the PlatformIO upload tools).
+
+Note: downloading workflow artifacts requires being signed in to GitHub, since
+that's a GitHub-wide restriction on Actions artifacts, not something this repo
+can turn off.
 
 ### Sensors created (per node)
 Battery
