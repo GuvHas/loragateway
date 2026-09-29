@@ -30,6 +30,7 @@ static void test_parse_success_payload(void) {
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 4.1f, *result.reading.batteryVoltage);
     TEST_ASSERT_EQUAL_UINT32(12, result.reading.bootCount);
     TEST_ASSERT_EQUAL_UINT32(10, result.reading.seq);
+    TEST_ASSERT_TRUE(result.reading.hasSeq);
     TEST_ASSERT_FALSE(result.reading.lowBattery);
     TEST_ASSERT_EQUAL_INT(static_cast<int>(SensorError::None), static_cast<int>(result.reading.err));
     TEST_ASSERT_EQUAL_STRING("none", result.reading.rawErr.c_str());
@@ -67,6 +68,9 @@ static void test_parse_defaults_when_optional_fields_missing(void) {
     TEST_ASSERT_FALSE(result.reading.batteryVoltage.has_value());
     TEST_ASSERT_EQUAL_UINT32(0, result.reading.bootCount);
     TEST_ASSERT_EQUAL_UINT32(0, result.reading.seq);
+    // A payload that never sends "seq" at all must be distinguishable from
+    // one that legitimately sends seq:0 -- see SensorReading::hasSeq.
+    TEST_ASSERT_FALSE(result.reading.hasSeq);
     TEST_ASSERT_FALSE(result.reading.lowBattery);
     TEST_ASSERT_EQUAL_STRING("none", result.reading.rawErr.c_str());
 }

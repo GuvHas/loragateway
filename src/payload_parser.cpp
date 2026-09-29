@@ -245,7 +245,8 @@ ParseResult parseSensorPayload(const char* json, size_t length) {
         result.error = ParseError::WrongType;
         return result;
     }
-    if (obj.containsKey("seq") && !tryReadNonNegativeInt(obj["seq"], reading.seq)) {
+    reading.hasSeq = obj.containsKey("seq");
+    if (reading.hasSeq && !tryReadNonNegativeInt(obj["seq"], reading.seq)) {
         result.error = ParseError::WrongType;
         return result;
     }

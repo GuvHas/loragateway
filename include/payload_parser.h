@@ -40,6 +40,13 @@ struct SensorReading {
     std::optional<float> batteryVoltage;
     uint32_t bootCount = 0;
     uint32_t seq = 0;
+    // False when the payload omitted "seq" entirely (bootCount/seq then just
+    // default to 0, indistinguishable from a real seq-0 reading). Consumers
+    // that key behavior off seq -- e.g. GatewayOrchestrator's retransmission
+    // dedup -- must check this first, or a node that never sends "seq" would
+    // look identical on every packet and get treated as an endless duplicate
+    // after its first reading.
+    bool hasSeq = false;
     bool lowBattery = false;
     SensorError err = SensorError::None;
     std::string rawErr = "none"; // preserved verbatim for forward-compat forwarding

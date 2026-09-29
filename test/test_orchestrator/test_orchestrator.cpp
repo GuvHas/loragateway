@@ -344,6 +344,40 @@ static void test_reboot_resets_dedup_even_with_lower_seq(void) {
     TEST_ASSERT_EQUAL_UINT32(10, mqtt.published.size());
 }
 
+static void test_dedup_is_bypassed_when_payload_has_no_seq_field(void) {
+    // Regression test: a payload that never sends "seq" at all has
+    // bootCount/seq default to (0, 0) on every single packet (see
+    // SensorReading::hasSeq). Without gating dedup on hasSeq, this node's
+    // very first packet would set lastSeen to (0, 0), and every later
+    // packet -- despite being a genuinely new, distinct reading -- would
+    // look like a duplicate of (0, 0) forever and never get published again.
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("legacy");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    loRa.push(R"({"id":"legacy","t":20.0,"h":40.0,"v":4.0})"); // no boot/seq at all
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // 8 discovery + 1 state
+
+    loRa.push(R"({"id":"legacy","t":20.5,"h":41.0,"v":4.0})"); // still no boot/seq
+    orchestrator.tick();
+    loRa.push(R"({"id":"legacy","t":21.0,"h":42.0,"v":4.0})"); // still no boot/seq
+    orchestrator.tick();
+
+    // Each of these must publish its own state message -- none should be
+    // suppressed as a "duplicate".
+    TEST_ASSERT_EQUAL_UINT32(11, mqtt.published.size());
+}
+
 static void test_duplicate_is_not_shown_on_display_or_logged(void) {
     resetPacketLogSpy();
 
@@ -658,6 +692,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_lower_seq_than_last_seen_is_treated_as_duplicate);
     RUN_TEST(test_higher_seq_is_published_normally);
     RUN_TEST(test_reboot_resets_dedup_even_with_lower_seq);
+    RUN_TEST(test_dedup_is_bypassed_when_payload_has_no_seq_field);
     RUN_TEST(test_duplicate_is_not_shown_on_display_or_logged);
 
     RUN_TEST(test_offline_packets_are_queued_not_lost);
