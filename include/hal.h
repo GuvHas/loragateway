@@ -6,6 +6,7 @@
 // fakes in native unit tests. Concrete ESP32 implementations live in
 // hal_esp32.h/.cpp; nothing in this header includes Arduino.h.
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -52,7 +53,20 @@ public:
 
     virtual bool publish(const std::string& topic, const std::string& payload, bool retain) = 0;
 
-    // Services the underlying client (keep-alive ping, incoming messages).
+    using MessageCallback = std::function<void(const std::string& topic, const std::string& payload)>;
+
+    // Subscribes to `topic`; `callback` is invoked (synchronously, from
+    // loop() below -- never from interrupt context) whenever a message
+    // arrives on it. Must be re-called after every successful connect():
+    // MQTT subscriptions are broker-side state and don't survive a
+    // disconnect/reconnect, unlike this registration itself, which the
+    // concrete adapter keeps around to re-subscribe with on the next
+    // connect(). Returns false if the subscribe request itself failed.
+    virtual bool subscribe(const std::string& topic, MessageCallback callback) = 0;
+
+    // Services the underlying client (keep-alive ping, incoming messages --
+    // this is what actually invokes a subscribe() callback when a message
+    // has arrived).
     virtual void loop() = 0;
 };
 

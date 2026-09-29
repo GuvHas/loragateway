@@ -4,6 +4,7 @@
 // GatewayOrchestrator in native unit tests without any real hardware.
 
 #include <deque>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -67,17 +68,38 @@ public:
         return true;
     }
 
+    bool subscribe(const std::string& topic, gateway::IMqttClient::MessageCallback callback) override {
+        subscribeCalls.push_back(topic);
+        if (!subscribeShouldSucceed) return false;
+        subscriptions_[topic] = std::move(callback);
+        return true;
+    }
+
     void loop() override { loopCalls++; }
+
+    // Test helper: fires a previously-registered subscribe() callback as if
+    // a message had actually arrived on `topic`. A no-op (matching real
+    // broker behavior) if nothing is subscribed to that exact topic.
+    void simulateIncomingMessage(const std::string& topic, const std::string& payload) {
+        auto it = subscriptions_.find(topic);
+        if (it == subscriptions_.end()) return;
+        it->second(topic, payload);
+    }
 
     // Test controls
     bool connectShouldSucceed = true;
     bool publishShouldSucceed = true;
+    bool subscribeShouldSucceed = true;
     bool connected_ = false;
 
     // Test observations
     int connectAttempts = 0;
     int loopCalls = 0;
     std::vector<PublishedMessage> published;
+    std::vector<std::string> subscribeCalls;
+
+private:
+    std::map<std::string, gateway::IMqttClient::MessageCallback> subscriptions_;
 };
 
 class FakeStore : public gateway::INodeStore {

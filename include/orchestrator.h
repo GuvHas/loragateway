@@ -99,9 +99,18 @@ public:
     // was already at kMaxQueuedMessages when a new one needed to be queued.
     unsigned long droppedMessageCount() const { return droppedMessages_; }
 
+    // True once a valid restart command has arrived on this gateway's
+    // restart command topic (see gatewayCommandTopic() and
+    // buildGatewayCommandDiscoveryMessages()'s restart button). The
+    // orchestrator only sets the flag -- actually restarting the hardware is
+    // main.cpp's job (ESP.restart()), since that's not something a
+    // hardware-free, natively-tested class should do itself.
+    bool restartRequested() const { return restartRequested_; }
+
 private:
     void attemptWifiReconnect();
     void attemptMqttReconnect();
+    void subscribeToCommands();
     void flushQueue();
     void ingestLoRaPacket();
     void ingestOnePacket(const RawPacket& packet);
@@ -152,6 +161,8 @@ private:
 
     bool hasAttemptedWifiReconnect_ = false;
     unsigned long lastWifiReconnectAttemptMs_ = 0;
+
+    bool restartRequested_ = false;
 };
 
 } // namespace gateway

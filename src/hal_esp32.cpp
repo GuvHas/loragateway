@@ -77,7 +77,17 @@ bool Esp32LoRaReceiver::receive(RawPacket& out) {
 // Esp32MqttClient
 // ---------------------------------------------------------------------
 
-Esp32MqttClient::Esp32MqttClient(PubSubClient& client) : client_(client) {}
+Esp32MqttClient::Esp32MqttClient(PubSubClient& client) : client_(client) {
+    // PubSubClient.h picks MQTT_CALLBACK_SIGNATURE as a std::function on
+    // ESP32 (vs. a bare function pointer on platforms without <functional>),
+    // so this capturing lambda can bind directly -- no static instance
+    // pointer/trampoline needed here, unlike LoRa.onReceive() in
+    // Esp32LoRaReceiver, which only accepts a plain function pointer with no
+    // user-data slot.
+    client_.setCallback([this](char* topic, uint8_t* payload, unsigned int length) {
+        dispatchIncomingMessage(topic, payload, length);
+    });
+}
 
 void Esp32MqttClient::configure(const std::string& deviceNamePrefix, const std::string& user,
                                  const std::string& pass, const std::string& lwtTopic) {
@@ -107,6 +117,17 @@ void Esp32MqttClient::disconnect() {
 
 bool Esp32MqttClient::publish(const std::string& topic, const std::string& payload, bool retain) {
     return client_.publish(topic.c_str(), payload.c_str(), retain);
+}
+
+bool Esp32MqttClient::subscribe(const std::string& topic, MessageCallback callback) {
+    subscriptions_[topic] = std::move(callback);
+    return client_.subscribe(topic.c_str());
+}
+
+void Esp32MqttClient::dispatchIncomingMessage(char* topic, uint8_t* payload, unsigned int length) {
+    auto it = subscriptions_.find(topic);
+    if (it == subscriptions_.end()) return;
+    it->second(topic, std::string(reinterpret_cast<const char*>(payload), length));
 }
 
 void Esp32MqttClient::loop() {

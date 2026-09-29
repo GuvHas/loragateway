@@ -129,8 +129,19 @@ void GatewayOrchestrator::attemptMqttReconnect() {
     display_.showLines({"MQTT Reconnecting..."});
     if (mqtt_.connect()) {
         display_.showLines({"MQTT Connected!"});
+        // MQTT subscriptions are broker-side state and don't survive a
+        // disconnect/reconnect, so this must be redone on every successful
+        // connect(), not just the first.
+        subscribeToCommands();
         flushQueue();
     }
+}
+
+void GatewayOrchestrator::subscribeToCommands() {
+    mqtt_.subscribe(gatewayCommandTopic(baseTopic_, "restart"),
+                     [this](const std::string&, const std::string& payload) {
+                         if (payload == kRestartCommandPayload) restartRequested_ = true;
+                     });
 }
 
 void GatewayOrchestrator::flushQueue() {

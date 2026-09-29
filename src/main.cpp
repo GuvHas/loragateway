@@ -364,6 +364,9 @@ void sendGatewayDiscovery() {
   for (const auto& msg : gateway::buildGatewayDiscoveryMessages(currentGatewayIdentity())) {
     mqttAdapter.publish(msg.topic, msg.payload, true);
   }
+  for (const auto& msg : gateway::buildGatewayCommandDiscoveryMessages(currentGatewayIdentity())) {
+    mqttAdapter.publish(msg.topic, msg.payload, true);
+  }
 }
 
 // ==========================================
@@ -572,5 +575,22 @@ void loop() {
       gatewayDiscoverySent = true;
     }
     publishGatewayStatus();
+  }
+
+  // Set by GatewayOrchestrator when a valid restart command arrives on the
+  // gateway's command topic (see gatewayCommandTopic() and the HA "Restart"
+  // button discovery in buildGatewayCommandDiscoveryMessages()). Actually
+  // restarting the hardware is this file's job, not the orchestrator's,
+  // since that's not something a hardware-free, natively-tested class
+  // should do itself.
+  if (orchestrator.restartRequested()) {
+    display.displayOn();
+    display.clear();
+    display.drawString(0, 0, "Restart requested");
+    display.drawString(0, 15, "via MQTT command");
+    display.display();
+    Serial.println("Restarting (MQTT restart command)...");
+    delay(500); // let the OLED/Serial message actually be seen before rebooting
+    ESP.restart();
   }
 }
