@@ -184,6 +184,16 @@ struct GatewayStats {
     unsigned long packetsDropped = 0;
 };
 
+// Gateway firmware version, embedded as "sw" in every discovery message's
+// device block -- both the gateway's own HA device page and every per-node
+// device page (registered by an instance of this firmware), so a firmware
+// upgrade that changes the discovery schema is traceable from HA. A sensor
+// node's own firmware version isn't part of the payload contract
+// (SensorReading carries none), so a node's "sw" reflects the gateway that
+// discovered it, not the sensor node's own firmware -- documented at the
+// call site in buildEntityDiscovery().
+constexpr const char* kFirmwareVersion = "1.1.0";
+
 std::string availabilityTopic(const std::string& baseTopic);
 
 // State message for a single sensor reading, published to

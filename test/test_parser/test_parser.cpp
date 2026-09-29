@@ -374,17 +374,30 @@ static void test_build_auto_discovery_messages_covers_all_entities(void) {
     TEST_ASSERT_FALSE(err);
     TEST_ASSERT_EQUAL_STRING("lora/incoming/kitchen", doc["stat_t"].as<const char*>());
     TEST_ASSERT_EQUAL_STRING("LoRaGateway", doc["dev"]["via_device"].as<const char*>());
+    // Node devices carry the gateway firmware's version (they have none of
+    // their own in the payload contract) so a discovery-schema change is
+    // traceable from HA -- see kFirmwareVersion's comment.
+    TEST_ASSERT_EQUAL_STRING(kFirmwareVersion, doc["dev"]["sw"].as<const char*>());
 }
 
 static void test_build_gateway_discovery_messages_covers_diagnostics(void) {
     GatewayIdentity gateway{"LoRaGateway", "lora/incoming"};
     std::vector<MqttMessage> messages = buildGatewayDiscoveryMessages(gateway);
 
-    // wifi, heap, packets_rx, queue_depth, packets_dropped.
-    TEST_ASSERT_EQUAL_UINT32(5, messages.size());
+    // wifi, heap, packets_rx, queue_depth, packets_dropped, uptime.
+    TEST_ASSERT_EQUAL_UINT32(6, messages.size());
     TEST_ASSERT_EQUAL_STRING("homeassistant/sensor/loragateway_wifi/config", messages[0].topic.c_str());
     TEST_ASSERT_EQUAL_STRING("homeassistant/sensor/loragateway_queue/config", messages[3].topic.c_str());
     TEST_ASSERT_EQUAL_STRING("homeassistant/sensor/loragateway_dropped/config", messages[4].topic.c_str());
+    TEST_ASSERT_EQUAL_STRING("homeassistant/sensor/loragateway_uptime/config", messages[5].topic.c_str());
+
+    StaticJsonDocument<1024> doc;
+    DeserializationError err = deserializeJson(doc, messages[5].payload);
+    TEST_ASSERT_FALSE(err);
+    TEST_ASSERT_EQUAL_STRING("{{ value_json.uptime_s }}", doc["val_tpl"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("s", doc["unit_of_meas"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("duration", doc["dev_cla"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING(kFirmwareVersion, doc["dev"]["sw"].as<const char*>());
 }
 
 namespace {

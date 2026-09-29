@@ -13,6 +13,12 @@ namespace {
 const char* kKitchenSuccessPayload =
     R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":12,"seq":10,"lb":0,"err":"none"})";
 
+// Same node/boot as kKitchenSuccessPayload but a higher seq, so it isn't
+// treated as a duplicate retransmission by the seq-dedup logic below --
+// used wherever a test needs a second, genuinely new packet from "kitchen".
+const char* kKitchenSuccessPayloadSeq11 =
+    R"({"id":"kitchen","t":22.6,"h":45.2,"v":4.1,"boot":12,"seq":11,"lb":0,"err":"none"})";
+
 // Spy for GatewayOrchestrator::PacketLogCallback, which is a plain function
 // pointer (like Esp32Display's ActivityCallback), so it can't capture --
 // state has to live in globals reset at the top of each test that uses it.
@@ -66,8 +72,9 @@ static void test_happy_path_publishes_discovery_and_state(void) {
     TEST_ASSERT_FALSE(stateMsg.retain);
     TEST_ASSERT_TRUE(stateMsg.payload.find("\"rssi\":-72") != std::string::npos);
 
-    // A second packet from the same node should not re-send discovery.
-    loRa.push(kKitchenSuccessPayload, -70);
+    // A second, genuinely new packet (higher seq) from the same node should
+    // not re-send discovery.
+    loRa.push(kKitchenSuccessPayloadSeq11, -70);
     orchestrator.tick();
     TEST_ASSERT_EQUAL_UINT32(10, mqtt.published.size());
 }
@@ -229,6 +236,145 @@ static void test_approve_persists_and_clears_pending(void) {
 }
 
 // ---------------------------------------------------------------------
+// Seq-based deduplication: a node with nothing new to say may resend its
+// last reading (there's no ack protocol, so a node can't tell whether its
+// last transmission actually got through); a retransmission should still
+// count as received but must not be re-published/re-logged/re-displayed.
+// ---------------------------------------------------------------------
+
+static void test_duplicate_seq_is_counted_but_not_published(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    loRa.push(kKitchenSuccessPayload); // seq 10
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // 8 discovery + 1 state
+
+    loRa.push(kKitchenSuccessPayload); // exact retransmission: same seq 10
+    orchestrator.tick();
+
+    TEST_ASSERT_EQUAL_UINT32(2, orchestrator.packetsReceived()); // still counted as received
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());          // but NOT re-published
+}
+
+static void test_lower_seq_than_last_seen_is_treated_as_duplicate(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    loRa.push(kKitchenSuccessPayload); // seq 10
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+
+    // An out-of-order/stale retransmission carrying a lower seq than the
+    // highest already seen for this node's current boot.
+    loRa.push(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":12,"seq":5,"lb":0,"err":"none"})");
+    orchestrator.tick();
+
+    TEST_ASSERT_EQUAL_UINT32(2, orchestrator.packetsReceived());
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+}
+
+static void test_higher_seq_is_published_normally(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    loRa.push(kKitchenSuccessPayload); // seq 10
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+
+    loRa.push(kKitchenSuccessPayloadSeq11); // seq 11: genuinely new
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(10, mqtt.published.size());
+}
+
+static void test_reboot_resets_dedup_even_with_lower_seq(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    loRa.push(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":12,"seq":50,"lb":0,"err":"none"})");
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+
+    // Node rebooted (boot count increased) and its own seq counter restarted
+    // at 1 -- lower than the last-seen 50, but must NOT be treated as a
+    // duplicate, or a rebooted node would go silent forever.
+    loRa.push(R"({"id":"kitchen","t":22.0,"h":44.0,"v":4.1,"boot":13,"seq":1,"lb":0,"err":"none"})");
+    orchestrator.tick();
+
+    TEST_ASSERT_EQUAL_UINT32(10, mqtt.published.size());
+}
+
+static void test_duplicate_is_not_shown_on_display_or_logged(void) {
+    resetPacketLogSpy();
+
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(
+        wifi, loRa, mqtt, store, display, clock, "LoRaGateway", "lora/incoming",
+        gateway::GatewayOrchestrator::kDefaultMqttReconnectBackoffMs,
+        gateway::GatewayOrchestrator::kDefaultWifiReconnectBackoffMs, packetLogSpy);
+    orchestrator.begin();
+
+    loRa.push(kKitchenSuccessPayload);
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_INT(1, g_logCallCount);
+    TEST_ASSERT_EQUAL_INT(1, display.showCount);
+
+    loRa.push(kKitchenSuccessPayload); // duplicate
+    orchestrator.tick();
+
+    TEST_ASSERT_EQUAL_INT(1, g_logCallCount);  // unchanged: not re-logged
+    TEST_ASSERT_EQUAL_INT(1, display.showCount); // unchanged: OLED not re-flashed
+}
+
+// ---------------------------------------------------------------------
 // MQTT disconnect handling: queue while offline, respect backoff, flush
 // on reconnect.
 // ---------------------------------------------------------------------
@@ -349,11 +495,16 @@ static void test_queue_overrun_drops_oldest_and_counts_dropped(void) {
     // Now the broker goes away. This node is already fully discovered, so
     // its further packets each queue only their one state message -- this
     // test is purely about FIFO/drop-oldest queue mechanics, not discovery.
+    // Each iteration uses a strictly increasing seq so seq-dedup doesn't
+    // suppress them (they'd otherwise all look like retransmissions of the
+    // very first packet's seq 10).
     mqtt.connected_ = false;
     mqtt.connectShouldSucceed = false;
 
     for (int i = 0; i < 25; ++i) {
-        loRa.push(kKitchenSuccessPayload);
+        std::string payload = std::string(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":12,"seq":)") +
+                               std::to_string(11 + i) + R"(,"lb":0,"err":"none"})";
+        loRa.push(payload);
         orchestrator.tick();
     }
 
@@ -396,10 +547,12 @@ static void test_evicted_discovery_is_regenerated_on_next_packet(void) {
 
     // Flood with unrelated "garage" traffic -- never another kitchen packet
     // -- until every one of kitchen's original queued messages has been
-    // evicted by the 20-message cap.
-    const char* garagePayload =
-        R"({"id":"garage","t":18.0,"h":50.0,"v":4.0,"boot":1,"seq":1,"lb":0,"err":"none"})";
+    // evicted by the 20-message cap. Each iteration uses a strictly
+    // increasing seq so seq-dedup doesn't suppress all but the first of
+    // these (which would leave the queue too small to ever evict kitchen).
     for (int i = 0; i < 40; ++i) {
+        std::string garagePayload = std::string(R"({"id":"garage","t":18.0,"h":50.0,"v":4.0,"boot":1,"seq":)") +
+                                     std::to_string(1 + i) + R"(,"lb":0,"err":"none"})";
         loRa.push(garagePayload);
         orchestrator.tick();
     }
@@ -449,8 +602,9 @@ static void test_wifi_down_defers_mqtt_but_still_queues_packets(void) {
     TEST_ASSERT_EQUAL_INT(0, mqtt.connectAttempts); // never even tried MQTT without WiFi
     TEST_ASSERT_EQUAL_UINT32(9, orchestrator.queuedMessageCount()); // packet still captured
 
-    // Still within the WiFi backoff window: no retry yet, but packets keep queuing.
-    loRa.push(kKitchenSuccessPayload);
+    // Still within the WiFi backoff window: no retry yet, but packets keep
+    // queuing (a genuinely new packet -- higher seq -- so it isn't deduped).
+    loRa.push(kKitchenSuccessPayloadSeq11);
     orchestrator.tick();
     TEST_ASSERT_EQUAL_INT(1, wifi.reconnectAttempts);
     TEST_ASSERT_EQUAL_INT(0, mqtt.connectAttempts);
@@ -499,6 +653,12 @@ int main(int argc, char** argv) {
     RUN_TEST(test_packet_forwarded_callback_does_not_fire_for_pending_node);
     RUN_TEST(test_unknown_node_is_pending_and_not_published);
     RUN_TEST(test_approve_persists_and_clears_pending);
+
+    RUN_TEST(test_duplicate_seq_is_counted_but_not_published);
+    RUN_TEST(test_lower_seq_than_last_seen_is_treated_as_duplicate);
+    RUN_TEST(test_higher_seq_is_published_normally);
+    RUN_TEST(test_reboot_resets_dedup_even_with_lower_seq);
+    RUN_TEST(test_duplicate_is_not_shown_on_display_or_logged);
 
     RUN_TEST(test_offline_packets_are_queued_not_lost);
     RUN_TEST(test_reconnect_backoff_is_respected_then_flushes_queue);

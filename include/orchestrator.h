@@ -8,6 +8,7 @@
 // Preferences, WiFi, or a display directly.
 
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <map>
 #include <set>
@@ -116,6 +117,16 @@ private:
     // discovery has never been attempted (or was abandoned after an
     // eviction) and should be retried on the node's next packet.
     std::map<std::string, size_t> pendingDiscoveryCount_;
+
+    // (bootCount, seq) of the highest reading actually accepted per node, so
+    // a retransmission (there's no ack protocol, so a node can't tell
+    // whether its last packet got through) can be dropped instead of
+    // re-published/re-logged/re-displayed. See ingestLoRaPacket().
+    struct LastSeen {
+        uint32_t bootCount = 0;
+        uint32_t seq = 0;
+    };
+    std::map<std::string, LastSeen> lastSeenByNode_;
 
     std::deque<QueuedMessage> outboundQueue_;
 

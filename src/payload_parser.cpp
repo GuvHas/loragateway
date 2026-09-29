@@ -12,7 +12,12 @@ namespace gateway {
 namespace {
 
 constexpr size_t kSensorJsonCapacity = 512;
-constexpr size_t kDiscoveryJsonCapacity = 600;
+// 700, not 600: the extra "sw" (firmware version) field added to every
+// entity's nested "dev" object pushed the previous 600-byte capacity just
+// over the edge, which ArduinoJson handles by silently dropping the
+// assignment rather than erroring -- caught by test_parser's discovery tests
+// deserializing and asserting on "sw" specifically.
+constexpr size_t kDiscoveryJsonCapacity = 700;
 constexpr size_t kStatusJsonCapacity = 384;
 
 std::string trim(const std::string& s) {
@@ -416,6 +421,9 @@ MqttMessage buildEntityDiscovery(const std::string& component,
     dev["mdl"] = "LoRa Sensor Node";
     dev["mf"] = "DIY";
     dev["via_device"] = gateway.deviceName;
+    // See kFirmwareVersion's comment: this is the gateway firmware's
+    // version, not the sensor node's own (not part of the payload contract).
+    dev["sw"] = kFirmwareVersion;
 
     MqttMessage msg;
     msg.topic = "homeassistant/" + component + "/lora_" + haId + "_" + suffix + "/config";
@@ -478,6 +486,7 @@ std::vector<MqttMessage> buildGatewayDiscoveryMessages(const GatewayIdentity& ga
         dev["name"] = gateway.deviceName;
         dev["mdl"] = "ESP32 LoRa Gateway";
         dev["mf"] = "DIY";
+        dev["sw"] = kFirmwareVersion;
 
         MqttMessage msg;
         msg.topic = "homeassistant/sensor/" + gwId + "_" + suffix + "/config";
@@ -492,6 +501,10 @@ std::vector<MqttMessage> buildGatewayDiscoveryMessages(const GatewayIdentity& ga
     messages.push_back(buildGwSensor("queue", "Queue Depth", "{{ value_json.queue_depth }}", "msgs", ""));
     messages.push_back(
         buildGwSensor("dropped", "Packets Dropped", "{{ value_json.packets_dropped }}", "msgs", ""));
+    // uptime_s is already published in every gateway status message (see
+    // buildGatewayStatusMessage() below) but had no discovery entity, so it
+    // was never visible in Home Assistant despite being on the wire.
+    messages.push_back(buildGwSensor("uptime", "Uptime", "{{ value_json.uptime_s }}", "s", "duration"));
     return messages;
 }
 
