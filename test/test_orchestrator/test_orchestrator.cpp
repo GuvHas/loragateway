@@ -422,8 +422,9 @@ static void test_reboot_resets_dedup_even_with_lower_seq(void) {
 // process that had never itself restarted -- still remembered a much higher
 // bootCount from before the reflash. Every post-reflash packet looked like a
 // bootCount that went backwards and was silently dropped as a duplicate
-// forever, even though the node was fully approved and transmitting fine.
-// Any *change* in bootCount, not just an increase, must reset tracking.
+// forever, even though the node was fully approved and transmitting fine. A
+// bootCount of exactly 1 (this codebase's cold-boot signal) must reset
+// tracking even when it's lower than what's already stored.
 static void test_reflash_with_lower_boot_count_is_not_treated_as_duplicate(void) {
     FakeWifiRadio wifi;
     wifi.connected_ = true;
@@ -455,6 +456,46 @@ static void test_reflash_with_lower_boot_count_is_not_treated_as_duplicate(void)
     loRa.push(R"({"id":"kitchen","t":21.0,"h":44.0,"v":4.1,"boot":1,"seq":1,"lb":0,"err":"none"})");
     orchestrator.tick();
     TEST_ASSERT_EQUAL_UINT32(10, mqtt.published.size());
+}
+
+// Codex review (P2) on PR #24: the first fix attempt reset tracking on *any*
+// bootCount change, not just 1 or an increase -- which let two previously-
+// accepted, non-cold-boot bootCounts be replayed alternately to bypass
+// dedup indefinitely (each looked like a fresh "different" session relative
+// to the other). A lower bootCount that *isn't* 1 must still be rejected as
+// a duplicate, exactly as before the reflash fix.
+static void test_lower_boot_count_other_than_one_is_still_treated_as_duplicate(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    loRa.push(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":50,"seq":100,"lb":0,"err":"none"})");
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+
+    // A captured older packet (or an attacker's forged one) with a lower
+    // bootCount that is NOT 1 -- not a plausible cold boot, just a backwards
+    // value -- must still be rejected, same as pre-reflash-fix behavior.
+    loRa.push(R"({"id":"kitchen","t":99.0,"h":99.0,"v":4.1,"boot":5,"seq":1,"lb":0,"err":"none"})");
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(2, orchestrator.packetsReceived()); // still counted as received
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());          // but NOT published
+
+    // Replaying the original high-watermark packet again afterward must
+    // also still be rejected (same boot, same-or-lower seq) -- confirming
+    // the rejected lower-bootCount attempt didn't corrupt the watermark.
+    loRa.push(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":50,"seq":100,"lb":0,"err":"none"})");
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
 }
 
 static void test_dedup_is_bypassed_when_payload_has_no_seq_field(void) {
@@ -1252,6 +1293,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_higher_seq_is_published_normally);
     RUN_TEST(test_reboot_resets_dedup_even_with_lower_seq);
     RUN_TEST(test_reflash_with_lower_boot_count_is_not_treated_as_duplicate);
+    RUN_TEST(test_lower_boot_count_other_than_one_is_still_treated_as_duplicate);
     RUN_TEST(test_dedup_is_bypassed_when_payload_has_no_seq_field);
     RUN_TEST(test_duplicate_is_not_shown_on_display_or_logged);
 
