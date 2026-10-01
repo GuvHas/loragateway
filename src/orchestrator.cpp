@@ -362,9 +362,33 @@ void GatewayOrchestrator::ingestOnePacket(const RawPacket& packet) {
 
     // Deduplicate retransmissions: track the highest (bootCount, seq)
     // accepted per node and drop anything that isn't strictly newer, except
-    // that a higher bootCount (a reboot) always resets the check, since a
-    // rebooted node's own seq counter restarts at 0 and would otherwise look
-    // like an endless stream of "already seen" values.
+    // that a higher bootCount (a normal reboot) always resets the check --
+    // a rebooted node's own seq counter restarts at 0 and would otherwise
+    // look like an endless stream of "already seen" values -- and so does a
+    // bootCount of exactly 1, this codebase's established cold-boot signal
+    // (RTC memory, and so bootCount, resets to 0 only on power loss -- a
+    // flash or battery swap -- and the node increments it to 1 before ever
+    // transmitting; see loratemp's isScheduledDisplayBoot()/runNode() and
+    // SensorReading::swVersion's comment). Without that second case, a
+    // reflash/battery-swap -- whose bootCount restarts from 1, possibly far
+    // below whatever high-water mark this long-running gateway process
+    // still remembers from before the reflash -- looked exactly like an
+    // attacker replaying an old packet with a backwards bootCount, and was
+    // silently dropped forever with no recovery short of also restarting
+    // the gateway (a field report: a reflashed, already-approved node never
+    // appeared in MQTT until the gateway was manually restarted).
+    //
+    // Deliberately narrower than "any bootCount change resets the check"
+    // (Codex review on PR #24): that would let an attacker alternate
+    // between two previously-accepted bootCounts to bypass dedup
+    // indefinitely, each one looking like a fresh "different" session
+    // relative to the other. Gating the lower-bootCount exception on
+    // exactly 1 limits it to the one value a legitimate cold boot can
+    // actually produce; a captured bootCount-1 packet can still be
+    // replayed, but only as that one specific stale reading, not as an
+    // arbitrary pivot between any two sessions an attacker has observed --
+    // consistent with this link's existing threat model (no authentication,
+    // but no amplification of what a single captured packet can do either).
     //
     // Skipped entirely when the payload has no "seq" (reading.hasSeq is
     // false): bootCount/seq then just default to 0 on every single packet
@@ -375,14 +399,15 @@ void GatewayOrchestrator::ingestOnePacket(const RawPacket& packet) {
         auto seenIt = lastSeenByNode_.find(reading.id);
         if (seenIt == lastSeenByNode_.end()) {
             lastSeenByNode_[reading.id] = LastSeen{reading.bootCount, reading.seq};
-        } else if (reading.bootCount > seenIt->second.bootCount) {
+        } else if (reading.bootCount > seenIt->second.bootCount ||
+                   (reading.bootCount == 1 && reading.bootCount != seenIt->second.bootCount)) {
             seenIt->second = LastSeen{reading.bootCount, reading.seq};
         } else if (reading.bootCount == seenIt->second.bootCount && reading.seq > seenIt->second.seq) {
             seenIt->second.seq = reading.seq;
         } else {
-            // Same-or-earlier seq within the same boot (a retransmission), or
-            // a bootCount that went backwards (untrusted input over an
-            // unauthenticated LoRa link) -- either way, already seen.
+            // Same-or-earlier seq within the same boot (a retransmission),
+            // or a bootCount that went backwards without looking like a
+            // cold boot -- either way, already seen.
             isDuplicate = true;
         }
     }
