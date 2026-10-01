@@ -415,7 +415,21 @@ void GatewayOrchestrator::ingestOnePacket(const RawPacket& packet) {
 
     MqttMessage stateMsg = buildSensorStateMessage(reading, packet.rssi, route.topic);
     if (onPacketForwarded_) onPacketForwarded_(stateMsg.topic, stateMsg.payload);
-    enqueueOrPublish(stateMsg, false);
+    // Retained, same convention as the gateway's own status message (see
+    // main.cpp's publishGatewayStatus()): on a node's first sighting (or any
+    // re-discovery after a gateway restart/reflash), this state message is
+    // published immediately after that node's 8 discovery configs, in the
+    // same synchronous burst. Home Assistant needs to finish processing a
+    // discovery config -- creating the entity and subscribing to its state
+    // topic -- before it can receive anything published to that topic; a
+    // *non*-retained state message that lands on the broker before that
+    // subscription exists is gone forever, and the entity sits
+    // unavailable/stale until the node's *next* transmission, minutes later
+    // (a field report: Home Assistant only updated on a node's second
+    // packet, never its first). A retained message doesn't have this race:
+    // the broker hands it to a client immediately upon SUBSCRIBE regardless
+    // of what was published in between.
+    enqueueOrPublish(stateMsg, true);
     display_.showLines(buildForwardedSummary(reading, route.topic));
 }
 
