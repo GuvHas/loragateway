@@ -349,6 +349,39 @@ static void test_approve_persists_and_clears_pending(void) {
     TEST_ASSERT_EQUAL_INT(1, store.saveCount);
 }
 
+// Codex review on PR #25: state messages are now retained (to close a Home
+// Assistant discovery race -- see test_state_message_is_retained_to_avoid_ha_discovery_race),
+// which means a removed node's last reading would otherwise stay
+// permanently served to any future subscriber of that topic -- including a
+// re-approved node that reuses the exact same id -- looking exactly like
+// live current data. removeNode() must publish an empty retained payload to
+// clear it.
+static void test_remove_node_clears_retained_state_message(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    loRa.push(kKitchenSuccessPayload);
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // 8 discovery + 1 (retained) state
+
+    TEST_ASSERT_TRUE(orchestrator.removeNode("kitchen"));
+
+    const auto& tombstone = mqtt.published.back();
+    TEST_ASSERT_EQUAL_STRING("lora/incoming/kitchen", tombstone.topic.c_str());
+    TEST_ASSERT_EQUAL_STRING("", tombstone.payload.c_str());
+    TEST_ASSERT_TRUE(tombstone.retain);
+}
+
 // ---------------------------------------------------------------------
 // Seq-based deduplication: a node with nothing new to say may resend its
 // last reading (there's no ack protocol, so a node can't tell whether its
@@ -1329,6 +1362,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_packet_forwarded_callback_does_not_fire_for_pending_node);
     RUN_TEST(test_unknown_node_is_pending_and_not_published);
     RUN_TEST(test_approve_persists_and_clears_pending);
+    RUN_TEST(test_remove_node_clears_retained_state_message);
 
     RUN_TEST(test_duplicate_seq_is_counted_but_not_published);
     RUN_TEST(test_lower_seq_than_last_seen_is_treated_as_duplicate);

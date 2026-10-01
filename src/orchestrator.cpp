@@ -1,10 +1,23 @@
 #include "orchestrator.h"
 
+#include <cctype>
 #include <cstdio>
 
 namespace gateway {
 
 namespace {
+
+// Mirrors decideRoute()'s own lowercasing of a sanitized node id into its
+// state topic segment (payload_parser.cpp keeps its own toLower() private to
+// that translation unit), so removeNode() can reconstruct a node's exact
+// state topic without a RawPacket/decideRoute() call.
+std::string toLowerAscii(const std::string& s) {
+    std::string out = s;
+    for (char& c : out) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return out;
+}
 
 std::string formatOneDecimal(float value) {
     char buf[16];
@@ -129,6 +142,17 @@ bool GatewayOrchestrator::removeNode(const std::string& id) {
     // reported under this id.
     swVersionByNode_.erase(id);
     store_.saveNodeVersionsCsv(serializeNodeVersions(swVersionByNode_));
+
+    // Clear this node's retained last-known reading (Codex review on PR
+    // #25): now that state messages are retained -- to close a Home
+    // Assistant discovery race, see ingestOnePacket() -- a removed node's
+    // last reading would otherwise stay permanently served to any future
+    // subscriber (including a re-approved node that reuses this exact id,
+    // or Home Assistant simply reconnecting) looking exactly like live
+    // current data. An empty retained payload on the same topic is the
+    // standard MQTT idiom for asking the broker to delete a retained
+    // message.
+    enqueueOrPublish(MqttMessage{baseTopic_ + "/" + toLowerAscii(id), ""}, true);
     return true;
 }
 
