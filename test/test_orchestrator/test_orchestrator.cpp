@@ -69,7 +69,12 @@ static void test_happy_path_publishes_discovery_and_state(void) {
 
     const auto& stateMsg = mqtt.published.back();
     TEST_ASSERT_EQUAL_STRING("lora/incoming/kitchen", stateMsg.topic.c_str());
-    TEST_ASSERT_FALSE(stateMsg.retain);
+    // Retained, same as the gateway's own status message (see
+    // test_state_message_is_retained_to_avoid_ha_discovery_race below for
+    // why this matters): a non-retained state published in the same burst
+    // as this node's discovery configs can race Home Assistant's discovery
+    // processing and simply be missed.
+    TEST_ASSERT_TRUE(stateMsg.retain);
     TEST_ASSERT_TRUE(stateMsg.payload.find("\"rssi\":-72") != std::string::npos);
 
     // A second, genuinely new packet (higher seq) from the same node should
@@ -77,6 +82,42 @@ static void test_happy_path_publishes_discovery_and_state(void) {
     loRa.push(kKitchenSuccessPayloadSeq11, -70);
     orchestrator.tick();
     TEST_ASSERT_EQUAL_UINT32(10, mqtt.published.size());
+}
+
+// Field report: Home Assistant only updated a node's entities starting with
+// its *second* transmission, never its first. On first sighting, this
+// node's 8 discovery configs and its state message are all published
+// synchronously in the same burst; Home Assistant must finish processing a
+// discovery config (create the entity, subscribe to its state topic) before
+// it can receive anything on that topic. A non-retained state message that
+// reaches the broker before that subscription exists is gone forever --
+// unlike discovery, which this codebase already retains. Every state
+// message must be retained for exactly the same reason the gateway's own
+// status message already is (see main.cpp's publishGatewayStatus()).
+static void test_state_message_is_retained_to_avoid_ha_discovery_race(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    // Every one of this node's 8 discovery messages must be retained...
+    loRa.push(kKitchenSuccessPayload);
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+    for (size_t i = 0; i < 8; ++i) {
+        TEST_ASSERT_TRUE(mqtt.published[i].retain);
+    }
+    // ...and so must the state message published in the very same burst,
+    // immediately after them.
+    TEST_ASSERT_TRUE(mqtt.published[8].retain);
 }
 
 // A single tick() must drain every packet the HAL currently has buffered,
@@ -306,6 +347,39 @@ static void test_approve_persists_and_clears_pending(void) {
     TEST_ASSERT_TRUE(orchestrator.pendingNodeIds().empty());
     TEST_ASSERT_EQUAL_STRING("newnode", store.csv_.c_str());
     TEST_ASSERT_EQUAL_INT(1, store.saveCount);
+}
+
+// Codex review on PR #25: state messages are now retained (to close a Home
+// Assistant discovery race -- see test_state_message_is_retained_to_avoid_ha_discovery_race),
+// which means a removed node's last reading would otherwise stay
+// permanently served to any future subscriber of that topic -- including a
+// re-approved node that reuses the exact same id -- looking exactly like
+// live current data. removeNode() must publish an empty retained payload to
+// clear it.
+static void test_remove_node_clears_retained_state_message(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    loRa.push(kKitchenSuccessPayload);
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // 8 discovery + 1 (retained) state
+
+    TEST_ASSERT_TRUE(orchestrator.removeNode("kitchen"));
+
+    const auto& tombstone = mqtt.published.back();
+    TEST_ASSERT_EQUAL_STRING("lora/incoming/kitchen", tombstone.topic.c_str());
+    TEST_ASSERT_EQUAL_STRING("", tombstone.payload.c_str());
+    TEST_ASSERT_TRUE(tombstone.retain);
 }
 
 // ---------------------------------------------------------------------
@@ -1279,6 +1353,7 @@ int main(int argc, char** argv) {
     UNITY_BEGIN();
 
     RUN_TEST(test_happy_path_publishes_discovery_and_state);
+    RUN_TEST(test_state_message_is_retained_to_avoid_ha_discovery_race);
     RUN_TEST(test_tick_drains_all_queued_lora_packets_in_one_call);
     RUN_TEST(test_tick_caps_packets_drained_per_call);
     RUN_TEST(test_forwarded_packet_shows_curated_summary_not_raw_json);
@@ -1287,6 +1362,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_packet_forwarded_callback_does_not_fire_for_pending_node);
     RUN_TEST(test_unknown_node_is_pending_and_not_published);
     RUN_TEST(test_approve_persists_and_clears_pending);
+    RUN_TEST(test_remove_node_clears_retained_state_message);
 
     RUN_TEST(test_duplicate_seq_is_counted_but_not_published);
     RUN_TEST(test_lower_seq_than_last_seen_is_treated_as_duplicate);
