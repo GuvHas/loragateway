@@ -417,6 +417,46 @@ static void test_reboot_resets_dedup_even_with_lower_seq(void) {
     TEST_ASSERT_EQUAL_UINT32(10, mqtt.published.size());
 }
 
+// Field report: an already-approved node was reflashed (resetting its RTC
+// memory, so bootCount restarted from 1), but the gateway -- a long-running
+// process that had never itself restarted -- still remembered a much higher
+// bootCount from before the reflash. Every post-reflash packet looked like a
+// bootCount that went backwards and was silently dropped as a duplicate
+// forever, even though the node was fully approved and transmitting fine.
+// Any *change* in bootCount, not just an increase, must reset tracking.
+static void test_reflash_with_lower_boot_count_is_not_treated_as_duplicate(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    // Node has been running a long time before the gateway ever restarted.
+    loRa.push(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":50,"seq":100,"lb":0,"err":"none"})");
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+
+    // Node gets reflashed/battery-swapped: its RTC memory resets, so this
+    // cold boot's bootCount/seq are far *lower* than what the gateway still
+    // remembers -- must still be accepted, not suppressed forever.
+    loRa.push(R"({"id":"kitchen","t":21.0,"h":44.0,"v":4.1,"boot":1,"seq":1,"lb":0,"err":"none"})");
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(10, mqtt.published.size());
+
+    // And dedup must still work normally from this new, lower watermark:
+    // a retransmission of that same reflash packet must be dropped.
+    loRa.push(R"({"id":"kitchen","t":21.0,"h":44.0,"v":4.1,"boot":1,"seq":1,"lb":0,"err":"none"})");
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(10, mqtt.published.size());
+}
+
 static void test_dedup_is_bypassed_when_payload_has_no_seq_field(void) {
     // Regression test: a payload that never sends "seq" at all has
     // bootCount/seq default to (0, 0) on every single packet (see
@@ -1211,6 +1251,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_lower_seq_than_last_seen_is_treated_as_duplicate);
     RUN_TEST(test_higher_seq_is_published_normally);
     RUN_TEST(test_reboot_resets_dedup_even_with_lower_seq);
+    RUN_TEST(test_reflash_with_lower_boot_count_is_not_treated_as_duplicate);
     RUN_TEST(test_dedup_is_bypassed_when_payload_has_no_seq_field);
     RUN_TEST(test_duplicate_is_not_shown_on_display_or_logged);
 

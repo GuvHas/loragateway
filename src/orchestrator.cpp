@@ -362,9 +362,21 @@ void GatewayOrchestrator::ingestOnePacket(const RawPacket& packet) {
 
     // Deduplicate retransmissions: track the highest (bootCount, seq)
     // accepted per node and drop anything that isn't strictly newer, except
-    // that a higher bootCount (a reboot) always resets the check, since a
-    // rebooted node's own seq counter restarts at 0 and would otherwise look
-    // like an endless stream of "already seen" values.
+    // that any *change* in bootCount -- not just an increase -- always
+    // resets the check and is accepted, since a rebooted node's own seq
+    // counter restarts at 0 (otherwise an endless stream of "already seen"
+    // values) and a reflash/battery-swap resets the node's RTC memory
+    // entirely, so its bootCount can restart from 1 even if this
+    // long-running gateway process still remembers a much higher one from
+    // before the reflash -- previously indistinguishable from "an attacker
+    // replaying an old packet with a backwards bootCount" and silently
+    // dropped forever until the *gateway* was also restarted (a field
+    // report: a reflashed, already-approved node never appeared in MQTT
+    // until the gateway was manually restarted). This doesn't meaningfully
+    // weaken the replay protection: a forged higher bootCount was already
+    // accepted unconditionally before this change, so trusting a
+    // *different* one instead of only a *higher* one just also covers the
+    // legitimate reflash case.
     //
     // Skipped entirely when the payload has no "seq" (reading.hasSeq is
     // false): bootCount/seq then just default to 0 on every single packet
@@ -375,14 +387,12 @@ void GatewayOrchestrator::ingestOnePacket(const RawPacket& packet) {
         auto seenIt = lastSeenByNode_.find(reading.id);
         if (seenIt == lastSeenByNode_.end()) {
             lastSeenByNode_[reading.id] = LastSeen{reading.bootCount, reading.seq};
-        } else if (reading.bootCount > seenIt->second.bootCount) {
+        } else if (reading.bootCount != seenIt->second.bootCount) {
             seenIt->second = LastSeen{reading.bootCount, reading.seq};
-        } else if (reading.bootCount == seenIt->second.bootCount && reading.seq > seenIt->second.seq) {
+        } else if (reading.seq > seenIt->second.seq) {
             seenIt->second.seq = reading.seq;
         } else {
-            // Same-or-earlier seq within the same boot (a retransmission), or
-            // a bootCount that went backwards (untrusted input over an
-            // unauthenticated LoRa link) -- either way, already seen.
+            // Same-or-earlier seq within the same boot: a retransmission.
             isDuplicate = true;
         }
     }
