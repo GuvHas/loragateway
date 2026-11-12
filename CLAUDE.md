@@ -20,6 +20,9 @@ The ESP32 platform is pinned to 8.0.0 (Arduino core 3.x, ESP-IDF 5) in
 `platformio.ini`; before that it was 7.1.3 (Arduino core 2.0.17). Core 3.x
 changed the task watchdog API and starts the watchdog before `setup()`, so
 `setupWatchdog()` in `main.cpp` reconfigures it rather than initialising it.
+Core 3.x also outgrew the default 1.25 MB app partition, so the firmware uses
+`min_spiffs.csv` (two 1.9 MB OTA slots, NVS unchanged, no filesystem in use).
+A partition table change has to be flashed over USB.
 A platform bump is its own change, and the owner tests it on the board.
 `WiFiManager` is still taken from the head of its git repository.
 
