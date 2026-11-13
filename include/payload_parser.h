@@ -151,6 +151,16 @@ std::string urlEncodeComponent(const std::string& raw);
 // such restriction and must keep matching decideRoute()'s topic exactly.
 std::string haSafeSlug(const std::string& raw);
 
+// Longest friendly node name, in bytes, that sanitizeNodeName() keeps.
+constexpr size_t kMaxNodeNameLength = 32;
+
+// Cleans a friendly node name typed on the /devices page: drops control
+// characters and the ',' and '=' that the gateway's own CSV persistence
+// uses as separators, trims surrounding spaces, and cuts the result to
+// kMaxNodeNameLength bytes without splitting a UTF-8 character. An empty
+// result means "no name": the node id is used instead.
+std::string sanitizeNodeName(const std::string& raw);
+
 // ---------------------------------------------------------------------
 // Allowlist (replaces the inline CSV string scanning in main.cpp)
 // ---------------------------------------------------------------------
@@ -306,9 +316,14 @@ constexpr size_t kNodeDiscoveryEntityCount = 10;
 // "sw") publishes an explicit JSON null instead of omitting the key, for the
 // same HA device-registry-merge reason documented at buildEntityDiscovery()'s
 // call site.
+// `displayName`, when non-empty, replaces the node id as the device name and
+// the entity-name prefix (a friendly name set on the /devices page). Topics,
+// unique ids and the device id always stay on the node id, so renaming keeps
+// the node's entities and history in Home Assistant.
 std::vector<MqttMessage> buildAutoDiscoveryMessages(const std::string& nodeId,
                                                      const GatewayIdentity& gateway,
-                                                     const std::string& swVersion = "");
+                                                     const std::string& swVersion = "",
+                                                     const std::string& displayName = "");
 
 // Home Assistant MQTT-discovery configs for the gateway's own diagnostic
 // sensors (WiFi signal, free heap, packet count, store-and-forward queue

@@ -140,10 +140,19 @@ public:
         nodeVersionsSaveCount++;
     }
 
+    std::string loadNodeNamesCsv() override { return nodeNamesCsv_; }
+
+    void saveNodeNamesCsv(const std::string& csv) override {
+        nodeNamesCsv_ = csv;
+        nodeNamesSaveCount++;
+    }
+
     std::string csv_;
     int saveCount = 0;
     std::string nodeVersionsCsv_;
     int nodeVersionsSaveCount = 0;
+    std::string nodeNamesCsv_;
+    int nodeNamesSaveCount = 0;
 };
 
 class FakeDisplay : public gateway::IDisplay {

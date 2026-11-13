@@ -50,7 +50,9 @@ std::vector<std::string> buildForwardedSummary(const SensorReading& reading, con
     };
 }
 
-// Serializes/parses swVersionByNode_ for INodeStore::save/loadNodeVersionsCsv().
+// Serializes/parses swVersionByNode_ for INodeStore::save/loadNodeVersionsCsv(),
+// and nameByNode_ for save/loadNodeNamesCsv() (sanitizeNodeName() strips ','
+// and '=' from names for this reason).
 // "id=version" pairs joined by ',', mirroring AllowList's own CSV format and
 // its same pragmatic assumption that neither a (sanitized) node id nor a git
 // short hash contains '=' or ',' -- this is gateway-internal persistence, not
@@ -107,6 +109,7 @@ GatewayOrchestrator::GatewayOrchestrator(IWifiRadio& wifi, ILoRaReceiver& loRa, 
 void GatewayOrchestrator::begin() {
     allowList_ = AllowList(store_.loadAllowListCsv());
     swVersionByNode_ = parseNodeVersions(store_.loadNodeVersionsCsv());
+    nameByNode_ = parseNodeVersions(store_.loadNodeNamesCsv());
 }
 
 void GatewayOrchestrator::setIdentity(const std::string& deviceName, const std::string& baseTopic) {
@@ -145,6 +148,7 @@ bool GatewayOrchestrator::removeNode(const std::string& id) {
     swVersionByNode_.erase(id);
     lossByNode_.erase(id);
     store_.saveNodeVersionsCsv(serializeNodeVersions(swVersionByNode_));
+    if (nameByNode_.erase(id) > 0) store_.saveNodeNamesCsv(serializeNodeVersions(nameByNode_));
 
     // Clear this node's retained last-known reading (Codex review on PR
     // #25): now that state messages are retained -- to close a Home
@@ -157,6 +161,27 @@ bool GatewayOrchestrator::removeNode(const std::string& id) {
     // message.
     enqueueOrPublish(MqttMessage{baseTopic_ + "/" + toLowerAscii(id), ""}, true);
     return true;
+}
+
+bool GatewayOrchestrator::setNodeName(const std::string& id, const std::string& name) {
+    if (!allowList_.isAllowed(id)) return false;
+    std::string clean = sanitizeNodeName(name);
+    // A name equal to the id is the same as no name.
+    if (clean == id) clean.clear();
+    if (clean == nodeName(id)) return false;
+    if (clean.empty()) {
+        nameByNode_.erase(id);
+    } else {
+        nameByNode_[id] = clean;
+    }
+    store_.saveNodeNamesCsv(serializeNodeVersions(nameByNode_));
+    requestRediscovery(id);
+    return true;
+}
+
+std::string GatewayOrchestrator::nodeName(const std::string& id) const {
+    auto it = nameByNode_.find(id);
+    return it != nameByNode_.end() ? it->second : "";
 }
 
 std::vector<std::string> GatewayOrchestrator::pendingNodeIds() const {
@@ -363,8 +388,7 @@ void GatewayOrchestrator::onMessagePublished(const std::string& discoveryNodeId)
         auto dirtyIt = pendingRediscovery_.find(discoveryNodeId);
         if (dirtyIt != pendingRediscovery_.end()) {
             pendingRediscovery_.erase(dirtyIt);
-            auto swIt = swVersionByNode_.find(discoveryNodeId);
-            publishNodeDiscovery(discoveryNodeId, swIt != swVersionByNode_.end() ? swIt->second : "");
+            publishNodeDiscovery(discoveryNodeId);
         }
     }
 }
@@ -383,8 +407,18 @@ void GatewayOrchestrator::onMessageDropped(const std::string& discoveryNodeId) {
     pendingRediscovery_.erase(discoveryNodeId);
 }
 
-void GatewayOrchestrator::publishNodeDiscovery(const std::string& nodeId, const std::string& swVersion) {
-    auto discoveryMsgs = buildAutoDiscoveryMessages(nodeId, identity(), swVersion);
+void GatewayOrchestrator::requestRediscovery(const std::string& nodeId) {
+    if (pendingDiscoveryCount_.find(nodeId) != pendingDiscoveryCount_.end()) {
+        pendingRediscovery_.insert(nodeId);
+    } else if (discoveredNodes_.find(nodeId) != discoveredNodes_.end()) {
+        publishNodeDiscovery(nodeId);
+    }
+}
+
+void GatewayOrchestrator::publishNodeDiscovery(const std::string& nodeId) {
+    auto swIt = swVersionByNode_.find(nodeId);
+    std::string swVersion = swIt != swVersionByNode_.end() ? swIt->second : "";
+    auto discoveryMsgs = buildAutoDiscoveryMessages(nodeId, identity(), swVersion, nodeName(nodeId));
     pendingDiscoveryCount_[nodeId] = discoveryMsgs.size();
     for (const auto& msg : discoveryMsgs) {
         enqueueOrPublish(msg, true, nodeId);
@@ -440,7 +474,6 @@ void GatewayOrchestrator::ingestOnePacket(const RawPacket& packet) {
     bool swChanged = reading.swVersion.has_value() && *reading.swVersion != knownSw;
     if (swChanged) {
         swVersionByNode_[reading.id] = *reading.swVersion;
-        knownSw = *reading.swVersion;
         store_.saveNodeVersionsCsv(serializeNodeVersions(swVersionByNode_));
     }
 
@@ -463,13 +496,9 @@ void GatewayOrchestrator::ingestOnePacket(const RawPacket& packet) {
     // -- so it's deferred instead (see pendingRediscovery_ and
     // onMessagePublished()).
     if (isFirstDiscovery) {
-        publishNodeDiscovery(reading.id, knownSw);
+        publishNodeDiscovery(reading.id);
     } else if (swChanged) {
-        if (discoveryInFlight) {
-            pendingRediscovery_.insert(reading.id);
-        } else {
-            publishNodeDiscovery(reading.id, knownSw);
-        }
+        requestRediscovery(reading.id);
     }
 
     // Deduplicate retransmissions: track the highest (bootCount, seq)

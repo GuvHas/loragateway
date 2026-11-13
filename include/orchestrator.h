@@ -117,6 +117,16 @@ public:
     bool approveNode(const std::string& id);
     bool removeNode(const std::string& id);
 
+    // Sets the friendly name Home Assistant shows for an approved node (see
+    // buildAutoDiscoveryMessages()'s displayName); an empty name goes back
+    // to the node id. The name is cleaned with sanitizeNodeName(), persisted,
+    // and the node's discovery is republished if it was already discovered.
+    // Returns true if the stored name changed; false for an unknown id.
+    bool setNodeName(const std::string& id, const std::string& name);
+
+    // The node's friendly name, or "" if none is set.
+    std::string nodeName(const std::string& id) const;
+
     const AllowList& allowList() const { return allowList_; }
     std::vector<std::string> pendingNodeIds() const;
 
@@ -151,7 +161,13 @@ private:
     void enqueueOrPublish(const MqttMessage& msg, bool retain, const std::string& discoveryNodeId = "");
     void onMessagePublished(const std::string& discoveryNodeId);
     void onMessageDropped(const std::string& discoveryNodeId);
-    void publishNodeDiscovery(const std::string& nodeId, const std::string& swVersion);
+    // Publishes the node's full discovery set with its current sw version
+    // and friendly name.
+    void publishNodeDiscovery(const std::string& nodeId);
+    // Republishes discovery for an already-discovered node now, or after
+    // its in-flight batch completes (see pendingRediscovery_). A node not
+    // yet discovered picks up the change on its first discovery anyway.
+    void requestRediscovery(const std::string& nodeId);
     GatewayIdentity identity() const;
 
     IWifiRadio& wifi_;
@@ -204,6 +220,10 @@ private:
     // and republish null for any node not due for another cold boot anytime
     // soon.
     std::map<std::string, std::string> swVersionByNode_;
+
+    // Node id -> friendly name set on the /devices page. Persisted via
+    // store_.save/loadNodeNamesCsv(). Absent means "use the node id".
+    std::map<std::string, std::string> nameByNode_;
 
     // Node ids whose known "sw" changed while their previous discovery batch
     // was still draining out of pendingDiscoveryCount_/outboundQueue_ (see
