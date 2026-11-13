@@ -8,43 +8,44 @@ shows up automatically as a device with its own sensors.
 
 ## Download Latest Firmware
 
-Every push to `main` automatically builds the firmware and attaches it as a
-downloadable artifact — no local PlatformIO setup needed to get a flashable
-binary. The badge above shows whether the latest build succeeded.
+Every push to `main` builds the firmware and publishes it to the
+[**firmware-latest** release](https://github.com/GuvHas/loragateway/releases/tag/firmware-latest).
+No GitHub account or local PlatformIO setup is needed. The badge above shows
+whether the latest build succeeded.
 
-**This is an application-image update, not a full/blank-chip flash.** The
-artifact contains only `firmware.bin` — no bootloader or partition-table
-binaries — so it only works on a board that already has this project's
-bootloader and partition layout on it (e.g. one that's ever been flashed via
-`pio run -e ttgo-lora32-v21 -t upload`, which writes all three at first
-flash). Setting up a brand-new/erased board still needs that full PlatformIO
-upload once; after that, this artifact can be used for updates.
+| File | Use it for | Flash at |
+| --- | --- | --- |
+| [`firmware.bin`](https://github.com/GuvHas/loragateway/releases/download/firmware-latest/firmware.bin) | Updating a gateway that already runs this project, over USB or OTA | `0x10000` |
+| [`firmware-full.bin`](https://github.com/GuvHas/loragateway/releases/download/firmware-latest/firmware-full.bin) | A blank or erased board, or after a partition table change: bootloader, partition table and app in one image | `0x0` |
 
-1. Open the [`build-artifact.yml` workflow runs page](https://github.com/GuvHas/loragateway/actions/workflows/build-artifact.yml).
-2. Click the topmost run (it's the latest build off `main`; a green check
-   means it succeeded).
-3. Scroll down to the **Artifacts** section at the bottom of the run page.
-4. Download the `firmware-<commit-sha>` zip and unzip it — it contains
-   `firmware.bin`. Flash it at the application offset (`0x10000` on this
-   board) with `esptool.py --chip esp32 write_flash 0x10000 firmware.bin`,
-   or drop it in place of `.pio/build/ttgo-lora32-v21/firmware.bin` and run
-   the PlatformIO upload tools.
+```sh
+# Update an existing gateway
+esptool.py --chip esp32 write_flash 0x10000 firmware.bin
 
-Note: downloading workflow artifacts requires being signed in to GitHub, since
-that's a GitHub-wide restriction on Actions artifacts, not something this repo
-can turn off.
+# Set up a new board
+esptool.py --chip esp32 write_flash 0x0 firmware-full.bin
+```
+
+Without installing anything, Espressif's browser flasher
+[esptool-js](https://espressif.github.io/esptool-js/) (Chrome or Edge) can
+write either file: connect, pick the file and enter its offset. The release also has
+`flash-offsets.txt`, listing what is inside the full image.
+
+Each pull request builds the same files as a workflow artifact, on the run's
+page under **Artifacts**, for testing a change before it is merged.
+Artifacts need a GitHub sign-in to download; the release does not.
 
 > **Upgrading from a build before the move to platform 8.0.0 (#27)?** The
 > firmware now uses the `min_spiffs.csv` partition table (two 1.9 MB OTA
 > slots), because Arduino core 3.x outgrew the default app partition. A
 > partition table change can't be applied by OTA or by flashing
-> `firmware.bin` alone, so flash that one update over USB with
-> `pio run -e ttgo-lora32-v21 -t upload`. Later updates can use the artifact
-> or OTA again.
+> `firmware.bin` alone, so flash `firmware-full.bin` at `0x0` over USB once
+> (or run `pio run -e ttgo-lora32-v21 -t upload`). Later updates can use
+> `firmware.bin` or OTA again.
 
 ## First setup
 
-1. Flash the board over USB (see above).
+1. Flash `firmware-full.bin` over USB (see above).
 2. On first boot, with no saved WiFi, the gateway opens a setup portal as the
    access point `LoRaGateway-Setup`. Connect to it and enter your WiFi and
    MQTT broker details.
