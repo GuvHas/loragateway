@@ -10,6 +10,9 @@ void tearDown(void) {}
 
 namespace {
 
+// Discovery configs published per node on first sighting.
+constexpr uint32_t kD = gateway::kNodeDiscoveryEntityCount;
+
 const char* kKitchenSuccessPayload =
     R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":12,"seq":10,"lb":0,"err":"none"})";
 
@@ -64,8 +67,8 @@ static void test_happy_path_publishes_discovery_and_state(void) {
     TEST_ASSERT_EQUAL_UINT32(1, orchestrator.packetsReceived());
     TEST_ASSERT_EQUAL_UINT32(0, orchestrator.queuedMessageCount());
 
-    // 8 discovery messages (first time this node is seen) + 1 state message.
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+    // kD discovery messages (first time this node is seen) + 1 state message.
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size());
 
     const auto& stateMsg = mqtt.published.back();
     TEST_ASSERT_EQUAL_STRING("lora/incoming/kitchen", stateMsg.topic.c_str());
@@ -81,12 +84,12 @@ static void test_happy_path_publishes_discovery_and_state(void) {
     // not re-send discovery.
     loRa.push(kKitchenSuccessPayloadSeq11, -70);
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(10, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 2, mqtt.published.size());
 }
 
 // Field report: Home Assistant only updated a node's entities starting with
 // its *second* transmission, never its first. On first sighting, this
-// node's 8 discovery configs and its state message are all published
+// node's kD discovery configs and its state message are all published
 // synchronously in the same burst; Home Assistant must finish processing a
 // discovery config (create the entity, subscribe to its state topic) before
 // it can receive anything on that topic. A non-retained state message that
@@ -108,16 +111,16 @@ static void test_state_message_is_retained_to_avoid_ha_discovery_race(void) {
                                                "LoRaGateway", "lora/incoming");
     orchestrator.begin();
 
-    // Every one of this node's 8 discovery messages must be retained...
+    // Every one of this node's kD discovery messages must be retained...
     loRa.push(kKitchenSuccessPayload);
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
-    for (size_t i = 0; i < 8; ++i) {
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size());
+    for (size_t i = 0; i < kD; ++i) {
         TEST_ASSERT_TRUE(mqtt.published[i].retain);
     }
     // ...and so must the state message published in the very same burst,
     // immediately after them.
-    TEST_ASSERT_TRUE(mqtt.published[8].retain);
+    TEST_ASSERT_TRUE(mqtt.published[kD].retain);
 }
 
 // A single tick() must drain every packet the HAL currently has buffered,
@@ -148,8 +151,8 @@ static void test_tick_drains_all_queued_lora_packets_in_one_call(void) {
     orchestrator.tick(); // must drain all three, not just the first
 
     TEST_ASSERT_EQUAL_UINT32(3, orchestrator.packetsReceived());
-    // 8 discovery + 1 state message per node, for all 3 nodes.
-    TEST_ASSERT_EQUAL_UINT32(27, mqtt.published.size());
+    // kD discovery + 1 state message per node, for all 3 nodes.
+    TEST_ASSERT_EQUAL_UINT32(3 * (kD + 1), mqtt.published.size());
 }
 
 // Codex review (P2): draining "until the buffer reports empty" has no
@@ -176,7 +179,7 @@ static void test_tick_caps_packets_drained_per_call(void) {
     // isolating this test to the per-tick packet-count cap alone.
     loRa.push(kKitchenSuccessPayload); // seq 10
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // 8 discovery + 1 state
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size()); // kD discovery + 1 state
 
     // Queue more packets than the per-tick budget allows.
     const size_t kExtra = gateway::GatewayOrchestrator::kMaxPacketsPerTick + 5;
@@ -187,10 +190,10 @@ static void test_tick_caps_packets_drained_per_call(void) {
     }
 
     orchestrator.tick(); // must NOT drain all of kExtra in one call
-    TEST_ASSERT_EQUAL_UINT32(9 + gateway::GatewayOrchestrator::kMaxPacketsPerTick, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 1 + gateway::GatewayOrchestrator::kMaxPacketsPerTick, mqtt.published.size());
 
     orchestrator.tick(); // catches up on the remaining 5 next tick
-    TEST_ASSERT_EQUAL_UINT32(9 + kExtra, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 1 + kExtra, mqtt.published.size());
 }
 
 // ---------------------------------------------------------------------
@@ -372,7 +375,7 @@ static void test_remove_node_clears_retained_state_message(void) {
 
     loRa.push(kKitchenSuccessPayload);
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // 8 discovery + 1 (retained) state
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size()); // kD discovery + 1 (retained) state
 
     TEST_ASSERT_TRUE(orchestrator.removeNode("kitchen"));
 
@@ -405,13 +408,13 @@ static void test_duplicate_seq_is_counted_but_not_published(void) {
 
     loRa.push(kKitchenSuccessPayload); // seq 10
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // 8 discovery + 1 state
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size()); // kD discovery + 1 state
 
     loRa.push(kKitchenSuccessPayload); // exact retransmission: same seq 10
     orchestrator.tick();
 
     TEST_ASSERT_EQUAL_UINT32(2, orchestrator.packetsReceived()); // still counted as received
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());          // but NOT re-published
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size());          // but NOT re-published
 }
 
 static void test_lower_seq_than_last_seen_is_treated_as_duplicate(void) {
@@ -430,7 +433,7 @@ static void test_lower_seq_than_last_seen_is_treated_as_duplicate(void) {
 
     loRa.push(kKitchenSuccessPayload); // seq 10
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size());
 
     // An out-of-order/stale retransmission carrying a lower seq than the
     // highest already seen for this node's current boot.
@@ -438,7 +441,7 @@ static void test_lower_seq_than_last_seen_is_treated_as_duplicate(void) {
     orchestrator.tick();
 
     TEST_ASSERT_EQUAL_UINT32(2, orchestrator.packetsReceived());
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size());
 }
 
 static void test_higher_seq_is_published_normally(void) {
@@ -457,11 +460,11 @@ static void test_higher_seq_is_published_normally(void) {
 
     loRa.push(kKitchenSuccessPayload); // seq 10
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size());
 
     loRa.push(kKitchenSuccessPayloadSeq11); // seq 11: genuinely new
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(10, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 2, mqtt.published.size());
 }
 
 static void test_reboot_resets_dedup_even_with_lower_seq(void) {
@@ -480,7 +483,7 @@ static void test_reboot_resets_dedup_even_with_lower_seq(void) {
 
     loRa.push(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":12,"seq":50,"lb":0,"err":"none"})");
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size());
 
     // Node rebooted (boot count increased) and its own seq counter restarted
     // at 1 -- lower than the last-seen 50, but must NOT be treated as a
@@ -488,7 +491,7 @@ static void test_reboot_resets_dedup_even_with_lower_seq(void) {
     loRa.push(R"({"id":"kitchen","t":22.0,"h":44.0,"v":4.1,"boot":13,"seq":1,"lb":0,"err":"none"})");
     orchestrator.tick();
 
-    TEST_ASSERT_EQUAL_UINT32(10, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 2, mqtt.published.size());
 }
 
 // Field report: an already-approved node was reflashed (resetting its RTC
@@ -516,20 +519,20 @@ static void test_reflash_with_lower_boot_count_is_not_treated_as_duplicate(void)
     // Node has been running a long time before the gateway ever restarted.
     loRa.push(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":50,"seq":100,"lb":0,"err":"none"})");
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size());
 
     // Node gets reflashed/battery-swapped: its RTC memory resets, so this
     // cold boot's bootCount/seq are far *lower* than what the gateway still
     // remembers -- must still be accepted, not suppressed forever.
     loRa.push(R"({"id":"kitchen","t":21.0,"h":44.0,"v":4.1,"boot":1,"seq":1,"lb":0,"err":"none"})");
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(10, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 2, mqtt.published.size());
 
     // And dedup must still work normally from this new, lower watermark:
     // a retransmission of that same reflash packet must be dropped.
     loRa.push(R"({"id":"kitchen","t":21.0,"h":44.0,"v":4.1,"boot":1,"seq":1,"lb":0,"err":"none"})");
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(10, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 2, mqtt.published.size());
 }
 
 // Codex review (P2) on PR #24: the first fix attempt reset tracking on *any*
@@ -554,7 +557,7 @@ static void test_lower_boot_count_other_than_one_is_still_treated_as_duplicate(v
 
     loRa.push(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":50,"seq":100,"lb":0,"err":"none"})");
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size());
 
     // A captured older packet (or an attacker's forged one) with a lower
     // bootCount that is NOT 1 -- not a plausible cold boot, just a backwards
@@ -562,14 +565,14 @@ static void test_lower_boot_count_other_than_one_is_still_treated_as_duplicate(v
     loRa.push(R"({"id":"kitchen","t":99.0,"h":99.0,"v":4.1,"boot":5,"seq":1,"lb":0,"err":"none"})");
     orchestrator.tick();
     TEST_ASSERT_EQUAL_UINT32(2, orchestrator.packetsReceived()); // still counted as received
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());          // but NOT published
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size());          // but NOT published
 
     // Replaying the original high-watermark packet again afterward must
     // also still be rejected (same boot, same-or-lower seq) -- confirming
     // the rejected lower-bootCount attempt didn't corrupt the watermark.
     loRa.push(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":50,"seq":100,"lb":0,"err":"none"})");
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size());
 }
 
 static void test_dedup_is_bypassed_when_payload_has_no_seq_field(void) {
@@ -594,7 +597,7 @@ static void test_dedup_is_bypassed_when_payload_has_no_seq_field(void) {
 
     loRa.push(R"({"id":"legacy","t":20.0,"h":40.0,"v":4.0})"); // no boot/seq at all
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // 8 discovery + 1 state
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size()); // kD discovery + 1 state
 
     loRa.push(R"({"id":"legacy","t":20.5,"h":41.0,"v":4.0})"); // still no boot/seq
     orchestrator.tick();
@@ -603,7 +606,7 @@ static void test_dedup_is_bypassed_when_payload_has_no_seq_field(void) {
 
     // Each of these must publish its own state message -- none should be
     // suppressed as a "duplicate".
-    TEST_ASSERT_EQUAL_UINT32(11, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 3, mqtt.published.size());
 }
 
 static void test_duplicate_is_not_shown_on_display_or_logged(void) {
@@ -662,8 +665,8 @@ static void test_cold_boot_sw_version_is_included_in_initial_discovery(void) {
     loRa.push(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":0,"seq":0,"sw":"a1b2c3d"})");
     orchestrator.tick();
 
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // 8 discovery + 1 state
-    for (size_t i = 0; i < 8; ++i) {
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size()); // kD discovery + 1 state
+    for (size_t i = 0; i < kD; ++i) {
         TEST_ASSERT_TRUE(mqtt.published[i].payload.find("\"a1b2c3d\"") != std::string::npos);
     }
 }
@@ -686,16 +689,16 @@ static void test_new_sw_version_triggers_discovery_republish(void) {
     // feature, or simply lost its very first cold-boot transmission).
     loRa.push(kKitchenSuccessPayload); // boot:12, seq:10, no "sw"
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // 8 discovery + 1 state
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size()); // kD discovery + 1 state
 
     // A later reboot (battery swap / reflash): higher bootCount resets seq,
     // and this cold-boot packet now carries "sw" for the first time.
     loRa.push(R"({"id":"kitchen","t":21.0,"h":44.0,"v":4.1,"boot":13,"seq":0,"sw":"a1b2c3d"})");
     orchestrator.tick();
 
-    // 8 fresh discovery messages + 1 state message on top of the first batch.
-    TEST_ASSERT_EQUAL_UINT32(18, mqtt.published.size());
-    for (size_t i = 9; i < 17; ++i) {
+    // kD fresh discovery messages + 1 state message on top of the first batch.
+    TEST_ASSERT_EQUAL_UINT32(2 * kD + 2, mqtt.published.size());
+    for (size_t i = kD + 1; i < 2 * kD + 1; ++i) {
         TEST_ASSERT_TRUE(mqtt.published[i].payload.find("\"a1b2c3d\"") != std::string::npos);
     }
 }
@@ -717,7 +720,7 @@ static void test_subsequent_packets_without_sw_do_not_erase_stored_version(void)
     // Cold boot carrying "sw": initial discovery already includes it.
     loRa.push(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":0,"seq":0,"sw":"a1b2c3d"})");
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size());
 
     // Every subsequent packet (bootCount unchanged) omits "sw" entirely, as
     // real nodes do to save airtime/battery -- must not trigger another
@@ -728,7 +731,7 @@ static void test_subsequent_packets_without_sw_do_not_erase_stored_version(void)
     orchestrator.tick();
 
     // Only the two state messages were added -- no extra discovery batch.
-    TEST_ASSERT_EQUAL_UINT32(11, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 3, mqtt.published.size());
 
     // A later reboot reporting the *same* "sw" it already told the gateway.
     // If the sw-less packets above had wrongly cleared the stored version,
@@ -738,7 +741,7 @@ static void test_subsequent_packets_without_sw_do_not_erase_stored_version(void)
     loRa.push(R"({"id":"kitchen","t":21.0,"h":44.0,"v":4.1,"boot":1,"seq":0,"sw":"a1b2c3d"})");
     orchestrator.tick();
 
-    TEST_ASSERT_EQUAL_UINT32(12, mqtt.published.size()); // one more state message only
+    TEST_ASSERT_EQUAL_UINT32(kD + 4, mqtt.published.size()); // one more state message only
 }
 
 static void test_same_sw_version_again_does_not_retrigger_discovery(void) {
@@ -757,7 +760,7 @@ static void test_same_sw_version_again_does_not_retrigger_discovery(void) {
 
     loRa.push(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":0,"seq":0,"sw":"a1b2c3d"})");
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size());
 
     // Another cold-boot packet reporting the *same* version it already told
     // the gateway (e.g. a brown-out reboot on unchanged firmware) must not
@@ -766,7 +769,7 @@ static void test_same_sw_version_again_does_not_retrigger_discovery(void) {
     loRa.push(R"({"id":"kitchen","t":21.0,"h":44.0,"v":4.1,"boot":1,"seq":0,"sw":"a1b2c3d"})");
     orchestrator.tick();
 
-    TEST_ASSERT_EQUAL_UINT32(10, mqtt.published.size()); // one more state message only
+    TEST_ASSERT_EQUAL_UINT32(kD + 2, mqtt.published.size()); // one more state message only
 }
 
 // Codex review (P1): swVersionByNode_ was RAM-only, so a gateway restart
@@ -814,8 +817,8 @@ static void test_learned_sw_version_is_persisted_and_survives_restart(void) {
     loRa2.push(R"({"id":"kitchen","t":21.0,"h":44.0,"v":4.1,"boot":0,"seq":1})");
     orchestrator2.tick();
 
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt2.published.size()); // 8 discovery + 1 state
-    for (size_t i = 0; i < 8; ++i) {
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt2.published.size()); // kD discovery + 1 state
+    for (size_t i = 0; i < kD; ++i) {
         TEST_ASSERT_TRUE(mqtt2.published[i].payload.find("\"a1b2c3d\"") != std::string::npos);
     }
 }
@@ -853,8 +856,8 @@ static void test_sw_reported_before_approval_is_not_lost(void) {
     loRa.push(R"({"id":"newnode","t":20.5,"h":41.0,"v":4.0,"boot":0,"seq":1})");
     orchestrator.tick();
 
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // 8 discovery + 1 state
-    for (size_t i = 0; i < 8; ++i) {
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size()); // kD discovery + 1 state
+    for (size_t i = 0; i < kD; ++i) {
         TEST_ASSERT_TRUE(mqtt.published[i].payload.find("\"f00dcaf\"") != std::string::npos);
     }
 }
@@ -886,14 +889,14 @@ static void test_sw_change_during_in_flight_discovery_is_applied_once_batch_comp
     loRa.push(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":0,"seq":0,"sw":"v1"})");
     orchestrator.tick();
     TEST_ASSERT_EQUAL_UINT32(0, mqtt.published.size());
-    TEST_ASSERT_EQUAL_UINT32(9, orchestrator.queuedMessageCount()); // 8 discovery(v1) + 1 state
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, orchestrator.queuedMessageCount()); // kD discovery(v1) + 1 state
 
     // Cold boot #2 (a reflash while still offline): "v2". The v1 batch is
     // still in flight, so this must be deferred, not dropped.
     loRa.push(R"({"id":"kitchen","t":21.0,"h":44.0,"v":4.1,"boot":1,"seq":0,"sw":"v2"})");
     orchestrator.tick();
     TEST_ASSERT_EQUAL_UINT32(0, mqtt.published.size());
-    TEST_ASSERT_EQUAL_UINT32(10, orchestrator.queuedMessageCount()); // + 1 more state message only
+    TEST_ASSERT_EQUAL_UINT32(kD + 2, orchestrator.queuedMessageCount()); // + 1 more state message only
 
     // Broker comes back: the stale v1 batch flushes and completes, which
     // must immediately trigger the deferred v2 republish.
@@ -901,14 +904,14 @@ static void test_sw_change_during_in_flight_discovery_is_applied_once_batch_comp
     clock.advance(gateway::GatewayOrchestrator::kDefaultMqttReconnectBackoffMs);
     orchestrator.tick();
 
-    // 8 (v1) + 8 (v2, republished the instant the v1 batch completed) + 2
-    // state messages = 18.
-    TEST_ASSERT_EQUAL_UINT32(18, mqtt.published.size());
+    // kD (v1) + kD (v2, republished the instant the v1 batch completed) + 2
+    // state messages.
+    TEST_ASSERT_EQUAL_UINT32(2 * kD + 2, mqtt.published.size());
     TEST_ASSERT_EQUAL_UINT32(0, orchestrator.queuedMessageCount());
-    for (size_t i = 0; i < 8; ++i) {
+    for (size_t i = 0; i < kD; ++i) {
         TEST_ASSERT_TRUE(mqtt.published[i].payload.find("\"v1\"") != std::string::npos);
     }
-    for (size_t i = 8; i < 16; ++i) {
+    for (size_t i = kD; i < 2 * kD; ++i) {
         TEST_ASSERT_TRUE(mqtt.published[i].payload.find("\"v2\"") != std::string::npos);
     }
 }
@@ -937,8 +940,32 @@ static void test_offline_packets_are_queued_not_lost(void) {
 
     TEST_ASSERT_EQUAL_INT(1, mqtt.connectAttempts);
     TEST_ASSERT_EQUAL_UINT32(0, mqtt.published.size());
-    // 8 discovery + 1 state message, all queued instead of lost.
-    TEST_ASSERT_EQUAL_UINT32(9, orchestrator.queuedMessageCount());
+    // kD discovery + 1 state message, all queued instead of lost.
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, orchestrator.queuedMessageCount());
+}
+
+// Two nodes seen for the first time during a broker outage must both fit in
+// the offline queue, discovery and state, without dropping anything.
+static void test_two_new_nodes_fit_in_offline_queue(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connectShouldSucceed = false;
+    FakeStore store("kitchen,garage");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    loRa.push(kKitchenSuccessPayload);
+    loRa.push(R"({"id":"garage","t":18.0,"h":50.0,"v":4.0,"boot":1,"seq":1,"lb":0,"err":"none"})");
+    orchestrator.tick();
+
+    TEST_ASSERT_EQUAL_UINT32(2 * (kD + 1), orchestrator.queuedMessageCount());
+    TEST_ASSERT_EQUAL_UINT32(0, orchestrator.droppedMessageCount());
 }
 
 static void test_reconnect_backoff_is_respected_then_flushes_queue(void) {
@@ -958,7 +985,7 @@ static void test_reconnect_backoff_is_respected_then_flushes_queue(void) {
     loRa.push(kKitchenSuccessPayload);
     orchestrator.tick(); // t=0: first connect attempt, fails, packet queued
     TEST_ASSERT_EQUAL_INT(1, mqtt.connectAttempts);
-    TEST_ASSERT_EQUAL_UINT32(9, orchestrator.queuedMessageCount());
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, orchestrator.queuedMessageCount());
 
     // Still within the 5s backoff window: no new attempt.
     orchestrator.tick();
@@ -972,7 +999,7 @@ static void test_reconnect_backoff_is_respected_then_flushes_queue(void) {
     clock.advance(1); // now exactly 5000ms since the first attempt
     orchestrator.tick();
     TEST_ASSERT_EQUAL_INT(2, mqtt.connectAttempts); // backoff elapsed, retried (still fails)
-    TEST_ASSERT_EQUAL_UINT32(9, orchestrator.queuedMessageCount()); // unchanged, still offline
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, orchestrator.queuedMessageCount()); // unchanged, still offline
 
     // Now let the broker accept the connection.
     mqtt.connectShouldSucceed = true;
@@ -982,7 +1009,7 @@ static void test_reconnect_backoff_is_respected_then_flushes_queue(void) {
     TEST_ASSERT_EQUAL_INT(3, mqtt.connectAttempts);
     TEST_ASSERT_TRUE(mqtt.connected());
     TEST_ASSERT_EQUAL_UINT32(0, orchestrator.queuedMessageCount());
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size());
 }
 
 static void test_malformed_packet_is_queued_to_base_topic_when_offline(void) {
@@ -1067,6 +1094,104 @@ static void test_malformed_binary_frame_forwarded_as_hex(void) {
 }
 
 // ---------------------------------------------------------------------
+// Link quality: SNR from the radio, loss % from gaps in seq
+// ---------------------------------------------------------------------
+
+static std::string lastStateFor(FakeMqtt& mqtt, const char* topic) {
+    for (auto it = mqtt.published.rbegin(); it != mqtt.published.rend(); ++it) {
+        if (it->topic == topic) return it->payload;
+    }
+    return "";
+}
+
+static void test_state_message_carries_packet_snr(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    loRa.push(kKitchenSuccessPayload, -95, -3.25f);
+    orchestrator.tick();
+
+    std::string state = lastStateFor(mqtt, "lora/incoming/kitchen");
+    TEST_ASSERT_TRUE(state.find("\"snr\":-3.25") != std::string::npos);
+    TEST_ASSERT_TRUE(state.find("\"loss\":0") != std::string::npos);
+}
+
+static void test_state_message_loss_reflects_seq_gap(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    loRa.push(kKitchenSuccessPayload);  // boot 12, seq 10
+    orchestrator.tick();
+    loRa.push(R"({"id":"kitchen","t":22.6,"h":45.2,"v":4.1,"boot":12,"seq":13,"lb":0,"err":"none"})");
+    orchestrator.tick();  // 11 and 12 lost: 2 of 4 expected
+
+    std::string state = lastStateFor(mqtt, "lora/incoming/kitchen");
+    TEST_ASSERT_TRUE(state.find("\"loss\":50") != std::string::npos);
+}
+
+static void test_duplicate_does_not_change_loss(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    loRa.push(kKitchenSuccessPayload);
+    loRa.push(kKitchenSuccessPayload);  // retransmission, dropped
+    loRa.push(kKitchenSuccessPayloadSeq11);
+    orchestrator.tick();
+
+    std::string state = lastStateFor(mqtt, "lora/incoming/kitchen");
+    TEST_ASSERT_TRUE(state.find("\"loss\":0") != std::string::npos);
+}
+
+static void test_cold_boot_resets_loss(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    loRa.push(kKitchenSuccessPayload);  // seq 10
+    loRa.push(R"({"id":"kitchen","t":22.6,"boot":12,"seq":20})");  // 9 lost
+    loRa.push(R"({"id":"kitchen","t":22.7,"boot":1,"seq":1})");    // reflashed
+    orchestrator.tick();
+
+    std::string state = lastStateFor(mqtt, "lora/incoming/kitchen");
+    TEST_ASSERT_TRUE(state.find("\"loss\":0") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------
 // Queue overrun: drop oldest once the bound is exceeded, and count it.
 // ---------------------------------------------------------------------
 
@@ -1088,7 +1213,7 @@ static void test_queue_overrun_drops_oldest_and_counts_dropped(void) {
     loRa.push(kKitchenSuccessPayload);
     orchestrator.tick();
     TEST_ASSERT_EQUAL_UINT32(0, orchestrator.queuedMessageCount());
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size());
 
     // Now the broker goes away. This node is already fully discovered, so
     // its further packets each queue only their one state message -- this
@@ -1099,7 +1224,8 @@ static void test_queue_overrun_drops_oldest_and_counts_dropped(void) {
     mqtt.connected_ = false;
     mqtt.connectShouldSucceed = false;
 
-    for (int i = 0; i < 25; ++i) {
+    const int kOfflinePackets = static_cast<int>(gateway::GatewayOrchestrator::kMaxQueuedMessages) + 5;
+    for (int i = 0; i < kOfflinePackets; ++i) {
         std::string payload = std::string(R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":12,"seq":)") +
                                std::to_string(11 + i) + R"(,"lb":0,"err":"none"})";
         loRa.push(payload);
@@ -1108,15 +1234,15 @@ static void test_queue_overrun_drops_oldest_and_counts_dropped(void) {
 
     TEST_ASSERT_EQUAL_UINT32(gateway::GatewayOrchestrator::kMaxQueuedMessages,
                               orchestrator.queuedMessageCount());
-    // 25 messages were enqueued while offline; only 20 fit, so 5 were dropped.
-    TEST_ASSERT_EQUAL_UINT32(25 - gateway::GatewayOrchestrator::kMaxQueuedMessages,
+    // Five more messages were enqueued while offline than fit, so 5 were dropped.
+    TEST_ASSERT_EQUAL_UINT32(5,
                               orchestrator.droppedMessageCount());
 
     for (const auto& msg : orchestrator.pendingQueue()) {
         TEST_ASSERT_EQUAL_STRING("lora/incoming/kitchen", msg.topic.c_str());
     }
 
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // unchanged since going offline
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size()); // unchanged since going offline
 }
 
 // A discovery message evicted from the queue before ever reaching MQTT must
@@ -1137,15 +1263,15 @@ static void test_evicted_discovery_is_regenerated_on_next_packet(void) {
                                                "LoRaGateway", "lora/incoming");
     orchestrator.begin();
 
-    // Kitchen's 8 discovery messages + 1 state message get queued but never
+    // Kitchen's kD discovery messages + 1 state message get queued but never
     // delivered (still offline).
     loRa.push(kKitchenSuccessPayload);
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(9, orchestrator.queuedMessageCount());
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, orchestrator.queuedMessageCount());
 
     // Flood with unrelated "garage" traffic -- never another kitchen packet
     // -- until every one of kitchen's original queued messages has been
-    // evicted by the 20-message cap. Each iteration uses a strictly
+    // evicted by the queue cap. Each iteration uses a strictly
     // increasing seq so seq-dedup doesn't suppress all but the first of
     // these (which would leave the queue too small to ever evict kitchen).
     for (int i = 0; i < 40; ++i) {
@@ -1198,7 +1324,7 @@ static void test_wifi_down_defers_mqtt_but_still_queues_packets(void) {
 
     TEST_ASSERT_EQUAL_INT(1, wifi.reconnectAttempts);
     TEST_ASSERT_EQUAL_INT(0, mqtt.connectAttempts); // never even tried MQTT without WiFi
-    TEST_ASSERT_EQUAL_UINT32(9, orchestrator.queuedMessageCount()); // packet still captured
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, orchestrator.queuedMessageCount()); // packet still captured
 
     // Still within the WiFi backoff window: no retry yet, but packets keep
     // queuing (a genuinely new packet -- higher seq -- so it isn't deduped).
@@ -1206,7 +1332,7 @@ static void test_wifi_down_defers_mqtt_but_still_queues_packets(void) {
     orchestrator.tick();
     TEST_ASSERT_EQUAL_INT(1, wifi.reconnectAttempts);
     TEST_ASSERT_EQUAL_INT(0, mqtt.connectAttempts);
-    TEST_ASSERT_EQUAL_UINT32(10, orchestrator.queuedMessageCount());
+    TEST_ASSERT_EQUAL_UINT32(kD + 2, orchestrator.queuedMessageCount());
 }
 
 static void test_wifi_reconnect_backoff_then_mqtt_follows(void) {
@@ -1438,7 +1564,7 @@ static void test_messages_are_queued_while_wifi_down_even_if_mqtt_reports_connec
     orchestrator.tick();
 
     TEST_ASSERT_EQUAL_UINT32(0, mqtt.published.size());
-    TEST_ASSERT_EQUAL_UINT32(9, orchestrator.queuedMessageCount());
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, orchestrator.queuedMessageCount());
     TEST_ASSERT_FALSE(orchestrator.online());
 }
 
@@ -1735,7 +1861,7 @@ static void test_home_assistant_online_triggers_rediscovery(void) {
     orchestrator.tick(); // connect + subscribe
     loRa.push(kKitchenSuccessPayload);
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // 8 discovery + state
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size()); // kD discovery + state
     TEST_ASSERT_FALSE(orchestrator.takeHomeAssistantRestart());
 
     mqtt.simulateIncomingMessage("homeassistant/status", "online");
@@ -1745,7 +1871,7 @@ static void test_home_assistant_online_triggers_rediscovery(void) {
     mqtt.published.clear();
     loRa.push(kKitchenSuccessPayloadSeq11);
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // discovery sent again
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size()); // discovery sent again
 }
 
 static void test_home_assistant_offline_is_ignored(void) {
@@ -1807,8 +1933,13 @@ int main(int argc, char** argv) {
     RUN_TEST(test_sw_change_during_in_flight_discovery_is_applied_once_batch_completes);
 
     RUN_TEST(test_offline_packets_are_queued_not_lost);
+    RUN_TEST(test_two_new_nodes_fit_in_offline_queue);
     RUN_TEST(test_reconnect_backoff_is_respected_then_flushes_queue);
     RUN_TEST(test_malformed_packet_is_queued_to_base_topic_when_offline);
+    RUN_TEST(test_state_message_carries_packet_snr);
+    RUN_TEST(test_state_message_loss_reflects_seq_gap);
+    RUN_TEST(test_duplicate_does_not_change_loss);
+    RUN_TEST(test_cold_boot_resets_loss);
     RUN_TEST(test_binary_frame_publishes_same_state_as_json);
     RUN_TEST(test_malformed_binary_frame_forwarded_as_hex);
 

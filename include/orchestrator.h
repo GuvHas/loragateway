@@ -37,7 +37,7 @@ public:
     // Beyond this, the oldest queued message is dropped to make room for
     // the newest one (see enqueueOrPublish()), and droppedMessageCount()
     // increments.
-    static constexpr size_t kMaxQueuedMessages = 20;
+    static constexpr size_t kMaxQueuedMessages = 32;
 
     // Bound on how many LoRa packets a single tick() will drain from the HAL
     // (see ingestLoRaPacket()). The LoRa link is unauthenticated (a node id
@@ -185,6 +185,13 @@ private:
         uint32_t seq = 0;
     };
     std::map<std::string, LastSeen> lastSeenByNode_;
+
+    // Node id -> sliding window of the node's last PacketLossWindow::kWindow
+    // expected seq numbers, for the "loss" field of its state message.
+    // Updated alongside lastSeenByNode_ and restarted whenever that
+    // watermark restarts (first sighting, new boot session), because seq
+    // restarts with the node's power cycle. RAM only.
+    std::map<std::string, PacketLossWindow> lossByNode_;
 
     // Node id -> last "sw" value that node actually reported (see
     // SensorReading::swVersion). A node only sends "sw" on its cold-boot

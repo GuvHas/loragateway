@@ -501,7 +501,38 @@ std::string gatewayCommandTopic(const std::string& baseTopic, const std::string&
     return baseTopic + "/gateway/command/" + commandName;
 }
 
-MqttMessage buildSensorStateMessage(const SensorReading& reading, int rssi, const std::string& topic) {
+void PacketLossWindow::reset() {
+    slots_.clear();
+    hasLast_ = false;
+    lastSeq_ = 0;
+}
+
+void PacketLossWindow::received(uint32_t seq) {
+    if (hasLast_ && seq > lastSeq_) {
+        // Cap the gap: anything past the window would be trimmed anyway, and
+        // a huge jump must not build a huge queue.
+        uint32_t gap = seq - lastSeq_ - 1;
+        if (gap > kWindow) gap = kWindow;
+        for (uint32_t i = 0; i < gap; ++i) slots_.push_back(false);
+    }
+    slots_.push_back(true);
+    while (slots_.size() > kWindow) slots_.pop_front();
+    hasLast_ = true;
+    lastSeq_ = seq;
+}
+
+std::optional<float> PacketLossWindow::lossPercent() const {
+    if (slots_.empty()) return std::nullopt;
+    size_t lost = 0;
+    for (bool got : slots_) {
+        if (!got) ++lost;
+    }
+    float pct = 100.0f * static_cast<float>(lost) / static_cast<float>(slots_.size());
+    return std::round(pct * 10.0f) / 10.0f;
+}
+
+MqttMessage buildSensorStateMessage(const SensorReading& reading, const LinkQuality& link,
+                                     const std::string& topic) {
     StaticJsonDocument<kSensorJsonCapacity> doc;
     doc["id"] = reading.id;
     if (reading.temperatureC.has_value()) doc["t"] = *reading.temperatureC; else doc["t"] = nullptr;
@@ -511,7 +542,9 @@ MqttMessage buildSensorStateMessage(const SensorReading& reading, int rssi, cons
     doc["seq"] = reading.seq;
     doc["lb"] = reading.lowBattery ? 1 : 0;
     doc["err"] = reading.rawErr;
-    doc["rssi"] = rssi;
+    doc["rssi"] = link.rssi;
+    if (link.snr.has_value()) doc["snr"] = *link.snr; else doc["snr"] = nullptr;
+    if (link.lossPct.has_value()) doc["loss"] = *link.lossPct; else doc["loss"] = nullptr;
 
     MqttMessage msg;
     msg.topic = topic;
@@ -623,6 +656,12 @@ std::vector<MqttMessage> buildAutoDiscoveryMessages(const std::string& nodeId,
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "err", "Error",
                                              "{{ value_json.err | default('none', true) }}", "", "",
                                              gateway, "diagnostic", -1, swVersion));
+    messages.push_back(buildEntityDiscovery("sensor", nodeId, "snr", "SNR", "{{ value_json.snr }}",
+                                             "dB", "signal_strength", gateway, "diagnostic", -1,
+                                             swVersion));
+    messages.push_back(buildEntityDiscovery("sensor", nodeId, "loss", "Packet Loss",
+                                             "{{ value_json.loss }}", "%", "", gateway, "diagnostic", 1,
+                                             swVersion));
     return messages;
 }
 

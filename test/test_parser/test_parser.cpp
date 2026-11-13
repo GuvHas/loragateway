@@ -375,7 +375,7 @@ static void test_build_sensor_state_message_preserves_null_readings(void) {
         R"({"id":"node_name","t":null,"h":null,"v":4.1,"boot":13,"seq":11,"lb":0,"err":"dht"})"));
     TEST_ASSERT_TRUE(parsed.ok());
 
-    MqttMessage msg = buildSensorStateMessage(parsed.reading, -72, "lora/incoming/node_name");
+    MqttMessage msg = buildSensorStateMessage(parsed.reading, LinkQuality{-72}, "lora/incoming/node_name");
     TEST_ASSERT_EQUAL_STRING("lora/incoming/node_name", msg.topic.c_str());
 
     StaticJsonDocument<512> doc;
@@ -392,7 +392,8 @@ static void test_build_auto_discovery_messages_covers_all_entities(void) {
     GatewayIdentity gateway{"LoRaGateway", "lora/incoming"};
     std::vector<MqttMessage> messages = buildAutoDiscoveryMessages("Kitchen", gateway);
 
-    TEST_ASSERT_EQUAL_UINT32(8, messages.size());
+    TEST_ASSERT_EQUAL_UINT32(kNodeDiscoveryEntityCount, messages.size());
+    TEST_ASSERT_EQUAL_UINT32(10, kNodeDiscoveryEntityCount);
     TEST_ASSERT_EQUAL_STRING("homeassistant/sensor/lora_kitchen_t/config", messages[0].topic.c_str());
 
     // Deserializing (rather than just measuring) a document needs more pool
@@ -420,7 +421,7 @@ static void test_build_auto_discovery_messages_includes_known_sw_version(void) {
     GatewayIdentity gateway{"LoRaGateway", "lora/incoming"};
     std::vector<MqttMessage> messages = buildAutoDiscoveryMessages("kitchen", gateway, "a1b2c3d");
 
-    TEST_ASSERT_EQUAL_UINT32(8, messages.size());
+    TEST_ASSERT_EQUAL_UINT32(kNodeDiscoveryEntityCount, messages.size());
 
     StaticJsonDocument<1024> doc;
     DeserializationError err = deserializeJson(doc, messages[0].payload);
@@ -636,8 +637,8 @@ static void test_binary_and_json_produce_identical_state_message(void) {
     TEST_ASSERT_TRUE(bin.ok());
     TEST_ASSERT_TRUE(json.ok());
 
-    MqttMessage a = buildSensorStateMessage(bin.reading, -80, "lora/incoming/garagetemp");
-    MqttMessage b = buildSensorStateMessage(json.reading, -80, "lora/incoming/garagetemp");
+    MqttMessage a = buildSensorStateMessage(bin.reading, LinkQuality{-80}, "lora/incoming/garagetemp");
+    MqttMessage b = buildSensorStateMessage(json.reading, LinkQuality{-80}, "lora/incoming/garagetemp");
     TEST_ASSERT_EQUAL_STRING(b.payload.c_str(), a.payload.c_str());
 }
 
@@ -648,8 +649,8 @@ static void test_binary_dht_failure_state_message_matches_json(void) {
     TEST_ASSERT_TRUE(bin.ok());
     TEST_ASSERT_TRUE(json.ok());
 
-    MqttMessage a = buildSensorStateMessage(bin.reading, -80, "t");
-    MqttMessage b = buildSensorStateMessage(json.reading, -80, "t");
+    MqttMessage a = buildSensorStateMessage(bin.reading, LinkQuality{-80}, "t");
+    MqttMessage b = buildSensorStateMessage(json.reading, LinkQuality{-80}, "t");
     TEST_ASSERT_EQUAL_STRING(b.payload.c_str(), a.payload.c_str());
 }
 
@@ -709,8 +710,150 @@ static void test_packet_with_other_first_byte_still_parsed_as_json(void) {
     TEST_ASSERT_EQUAL_INT(static_cast<int>(ParseError::InvalidJson), static_cast<int>(result.error));
 }
 
+// ---------------------------------------------------------------------
+// Link quality: SNR and packet loss in the state message and in HA
+// ---------------------------------------------------------------------
+
+static void test_state_message_carries_snr_and_loss(void) {
+    ParseResult parsed = parseSensorPayload(std::string(
+        R"({"id":"kitchen","t":22.5,"h":45.0,"v":4.1,"boot":12,"seq":10,"lb":0,"err":"none"})"));
+    TEST_ASSERT_TRUE(parsed.ok());
+
+    MqttMessage msg = buildSensorStateMessage(parsed.reading, LinkQuality{-91, 7.25f, 12.5f}, "t");
+
+    StaticJsonDocument<512> doc;
+    TEST_ASSERT_FALSE(deserializeJson(doc, msg.payload));
+    TEST_ASSERT_EQUAL_INT(-91, doc["rssi"].as<int>());
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 7.25f, doc["snr"].as<float>());
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 12.5f, doc["loss"].as<float>());
+}
+
+static void test_state_message_unknown_snr_and_loss_are_null(void) {
+    ParseResult parsed = parseSensorPayload(std::string(R"({"id":"kitchen","t":22.5})"));
+    TEST_ASSERT_TRUE(parsed.ok());
+
+    MqttMessage msg = buildSensorStateMessage(parsed.reading, LinkQuality{-91}, "t");
+
+    StaticJsonDocument<512> doc;
+    TEST_ASSERT_FALSE(deserializeJson(doc, msg.payload));
+    TEST_ASSERT_TRUE(doc.containsKey("snr"));
+    TEST_ASSERT_TRUE(doc["snr"].isNull());
+    TEST_ASSERT_TRUE(doc.containsKey("loss"));
+    TEST_ASSERT_TRUE(doc["loss"].isNull());
+}
+
+static const MqttMessage* findDiscovery(const std::vector<MqttMessage>& msgs, const char* suffix) {
+    std::string tail = std::string("_") + suffix + "/config";
+    for (const auto& m : msgs) {
+        if (m.topic.size() >= tail.size() &&
+            m.topic.compare(m.topic.size() - tail.size(), tail.size(), tail) == 0) {
+            return &m;
+        }
+    }
+    return nullptr;
+}
+
+static void test_discovery_includes_snr_sensor(void) {
+    GatewayIdentity gateway{"LoRaGateway", "lora/incoming"};
+    std::vector<MqttMessage> messages = buildAutoDiscoveryMessages("kitchen", gateway);
+    const MqttMessage* snr = findDiscovery(messages, "snr");
+    TEST_ASSERT_TRUE(snr != nullptr);
+
+    StaticJsonDocument<1024> doc;
+    TEST_ASSERT_FALSE(deserializeJson(doc, snr->payload));
+    TEST_ASSERT_EQUAL_STRING("homeassistant/sensor/lora_kitchen_snr/config", snr->topic.c_str());
+    TEST_ASSERT_EQUAL_STRING("kitchen SNR", doc["name"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("{{ value_json.snr }}", doc["val_tpl"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("dB", doc["unit_of_meas"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("signal_strength", doc["dev_cla"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("diagnostic", doc["ent_cat"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("lora_kitchen_snr", doc["uniq_id"].as<const char*>());
+}
+
+static void test_discovery_includes_packet_loss_sensor(void) {
+    GatewayIdentity gateway{"LoRaGateway", "lora/incoming"};
+    std::vector<MqttMessage> messages = buildAutoDiscoveryMessages("kitchen", gateway);
+    const MqttMessage* loss = findDiscovery(messages, "loss");
+    TEST_ASSERT_TRUE(loss != nullptr);
+
+    StaticJsonDocument<1024> doc;
+    TEST_ASSERT_FALSE(deserializeJson(doc, loss->payload));
+    TEST_ASSERT_EQUAL_STRING("kitchen Packet Loss", doc["name"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("{{ value_json.loss }}", doc["val_tpl"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("%", doc["unit_of_meas"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("diagnostic", doc["ent_cat"].as<const char*>());
+    TEST_ASSERT_EQUAL_INT(1, doc["sugg_dsp_prec"].as<int>());
+}
+
+// ---------------------------------------------------------------------
+// PacketLossWindow: loss % over the last kWindow expected packets
+// ---------------------------------------------------------------------
+
+static void test_loss_window_empty_has_no_value(void) {
+    PacketLossWindow w;
+    TEST_ASSERT_FALSE(w.lossPercent().has_value());
+}
+
+static void test_loss_window_consecutive_seq_is_zero_loss(void) {
+    PacketLossWindow w;
+    for (uint32_t seq = 1; seq <= 10; ++seq) w.received(seq);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, *w.lossPercent());
+}
+
+static void test_loss_window_counts_seq_gaps(void) {
+    PacketLossWindow w;
+    w.received(10);
+    w.received(11);
+    w.received(14);  // 12 and 13 lost: 2 of 5 expected
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 40.0f, *w.lossPercent());
+}
+
+static void test_loss_window_only_covers_last_window(void) {
+    PacketLossWindow w;
+    w.received(1);
+    w.received(52);  // 50 lost
+    for (uint32_t seq = 53; seq < 53 + PacketLossWindow::kWindow; ++seq) w.received(seq);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, *w.lossPercent());
+}
+
+static void test_loss_window_huge_gap_is_capped_at_window(void) {
+    PacketLossWindow w;
+    w.received(1);
+    w.received(1000000);
+    // 1 received out of kWindow expected, not a million-entry queue.
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 99.0f, *w.lossPercent());
+}
+
+static void test_loss_window_reset_starts_over(void) {
+    PacketLossWindow w;
+    w.received(1);
+    w.received(5);
+    w.reset();
+    w.received(1);  // new boot session: seq restarts
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, *w.lossPercent());
+}
+
+static void test_loss_window_rounds_to_one_decimal(void) {
+    PacketLossWindow w;
+    w.received(1);
+    w.received(3);  // 1 of 3 lost = 33.333...
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, 33.3f, *w.lossPercent());
+}
+
 int main(int argc, char** argv) {
     UNITY_BEGIN();
+
+    RUN_TEST(test_state_message_carries_snr_and_loss);
+    RUN_TEST(test_state_message_unknown_snr_and_loss_are_null);
+    RUN_TEST(test_discovery_includes_snr_sensor);
+    RUN_TEST(test_discovery_includes_packet_loss_sensor);
+    RUN_TEST(test_loss_window_empty_has_no_value);
+    RUN_TEST(test_loss_window_consecutive_seq_is_zero_loss);
+    RUN_TEST(test_loss_window_counts_seq_gaps);
+    RUN_TEST(test_loss_window_only_covers_last_window);
+    RUN_TEST(test_loss_window_huge_gap_is_capped_at_window);
+    RUN_TEST(test_loss_window_reset_starts_over);
+    RUN_TEST(test_loss_window_rounds_to_one_decimal);
 
     RUN_TEST(test_binary_healthy_frame_decodes);
     RUN_TEST(test_binary_flags_null_readings_and_sw_decode);

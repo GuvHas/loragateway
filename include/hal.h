@@ -15,6 +15,7 @@ namespace gateway {
 struct RawPacket {
     std::string data;
     int rssi = 0;
+    float snr = 0.0f; // dB, as reported by the radio for this packet
 };
 
 class IWifiRadio {

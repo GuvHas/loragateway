@@ -79,6 +79,7 @@ void Esp32LoRaReceiver::onDio0Receive(int packetSize) {
         slot.data[slot.length++] = static_cast<uint8_t>(LoRa.read());
     }
     slot.rssi = LoRa.packetRssi();
+    slot.snr = LoRa.packetSnr();
 
     // Publish the slot to the consumer only after it's fully written.
     head_.store(head + 1, std::memory_order_release);
@@ -93,6 +94,7 @@ bool Esp32LoRaReceiver::receive(RawPacket& out) {
     const IsrPacket& slot = ring_[tail % kRingCapacity];
     out.data.assign(reinterpret_cast<const char*>(slot.data), slot.length);
     out.rssi = slot.rssi;
+    out.snr = slot.snr;
 
     tail_.store(tail + 1, std::memory_order_release);
     return true;

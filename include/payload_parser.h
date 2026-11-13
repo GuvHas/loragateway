@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <deque>
 #include <optional>
 #include <string>
 #include <vector>
@@ -257,15 +258,47 @@ std::string availabilityTopic(const std::string& baseTopic);
 // the same "<baseTopic>/gateway/command/<name>" shape.
 std::string gatewayCommandTopic(const std::string& baseTopic, const std::string& commandName);
 
+// How well one packet arrived: RSSI and SNR as the radio measured them,
+// and the node's recent packet loss (see PacketLossWindow). Unknown SNR or
+// loss is published as JSON null.
+struct LinkQuality {
+    int rssi = 0;
+    std::optional<float> snr;
+    std::optional<float> lossPct;
+};
+
+// Packet loss for one node over its last kWindow expected packets, from
+// gaps in "seq". Only accepted (non-duplicate) packets are recorded, and the
+// window is reset whenever the dedup watermark resets (a new boot session,
+// where seq starts over).
+class PacketLossWindow {
+public:
+    static constexpr size_t kWindow = 100;
+
+    void reset();
+    void received(uint32_t seq);
+    // Lost / expected * 100, rounded to one decimal; empty when nothing has
+    // been recorded since the last reset.
+    std::optional<float> lossPercent() const;
+
+private:
+    std::deque<bool> slots_;  // true = received, false = missing
+    bool hasLast_ = false;
+    uint32_t lastSeq_ = 0;
+};
+
 // State message for a single sensor reading, published to
 // "<baseTopic>/<sanitized-id>" (the RoutingResult::topic from decideRoute).
 MqttMessage buildSensorStateMessage(const SensorReading& reading,
-                                     int rssi,
+                                     const LinkQuality& link,
                                      const std::string& topic);
+
+// Number of Home Assistant entities (discovery configs) per sensor node.
+constexpr size_t kNodeDiscoveryEntityCount = 10;
 
 // Home Assistant MQTT-discovery configs for one sensor node (temperature,
 // humidity, battery voltage, signal, boot count, sequence, low-battery,
-// error), mirroring the entities the original sendAutoDiscovery() published.
+// error, SNR, packet loss), mirroring the entities the original sendAutoDiscovery() published.
 // `swVersion` becomes the nested "dev" object's "sw" field when non-empty
 // (the node's actual firmware version, as last reported on a cold-boot
 // packet -- see SensorReading::swVersion and GatewayOrchestrator); an empty

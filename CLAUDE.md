@@ -116,14 +116,29 @@ Radio settings must match on both sides: 868 MHz, spreading factor 9, CRC on.
 
 | Topic | Retained | Content |
 | --- | --- | --- |
-| `<base>/<node id, lowercased>` | yes | Node reading plus `rssi` |
+| `<base>/<node id, lowercased>` | yes | Node reading plus `rssi`, `snr` and `loss` (see below) |
 | `<base>` | no | Raw bytes of a JSON packet that failed to parse, or lowercase hex of a bad binary frame |
 | `<base>/gateway/status` | yes | `online` or `offline` (last will). Availability topic for every entity. |
 | `<base>/gateway/state` | yes | Gateway diagnostics JSON |
 | `<base>/gateway/command/restart` | no | `PRESS` restarts the gateway |
 | `homeassistant/status` | (subscribed) | `online` from Home Assistant resends all discovery |
-| `homeassistant/<component>/lora_<slug>_<suffix>/config` | yes | Node discovery, 8 entities per node |
+| `homeassistant/<component>/lora_<slug>_<suffix>/config` | yes | Node discovery, `kNodeDiscoveryEntityCount` (10) entities per node |
 | `homeassistant/<component>/<gateway slug>_<suffix>/config` | yes | Gateway discovery |
+
+### Link quality in the node state
+
+- `rssi` and `snr` come from the radio for the packet that produced the
+  reading (`RawPacket`, captured in the receive interrupt).
+- `loss` is the percentage of the node's last 100 expected packets that never
+  arrived, worked out from gaps in `seq` (`PacketLossWindow`, one per node).
+  It starts over whenever the deduplication watermark resets (first sighting,
+  higher `boot`, `boot == 1`), because `seq` restarts with the node. It is
+  `null` when the payload has no `seq`. Duplicates do not change it. A gap
+  counts as at most 100 lost packets. RAM only, so it also starts over when
+  the gateway restarts.
+- The node increments `seq` once per wake, after its radio starts, and its
+  retries reuse it. A wake whose radio fails to start is therefore not counted
+  as lost; a wake whose sends all time out is.
 
 ## Rules that exist because something broke
 
@@ -155,7 +170,8 @@ Radio settings must match on both sides: 868 MHz, spreading factor 9, CRC on.
 - **Discovery bookkeeping is RAM only.** After a restart every node is
   rediscovered on its next packet.
 - **`tick()` must return in bounded time.** It drains at most 20 packets, and
-  the offline queue holds at most 20 messages, dropping the oldest.
+  the offline queue holds at most 32 messages, dropping the oldest. 32 is
+  enough for two nodes first seen during a broker outage (11 messages each).
 - **LoRa receive runs in the DIO0 interrupt.** That code must be `IRAM_ATTR`,
   must not allocate and must not log. `LoRa.onReceive()` takes a plain function
   pointer, hence the static trampoline. PubSubClient's callback is a

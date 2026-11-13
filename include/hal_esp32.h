@@ -70,6 +70,7 @@ private:
         uint8_t data[kMaxPacketBytes];
         size_t length = 0;
         int rssi = 0;
+        float snr = 0.0f;
     };
 
     // Invoked directly from the LoRa library's DIO0 interrupt handler (see

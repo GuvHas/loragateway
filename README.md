@@ -2,7 +2,7 @@
 
 [![Build Firmware Artifact](https://github.com/GuvHas/loragateway/actions/workflows/build-artifact.yml/badge.svg)](https://github.com/GuvHas/loragateway/actions/workflows/build-artifact.yml)
 
-An ESP32 (TTGO LoRa32) gateway that receives JSON sensor readings over LoRa
+An ESP32 (TTGO LoRa32) gateway that receives sensor readings (binary frame or JSON) over LoRa
 and publishes them to MQTT with Home Assistant MQTT-discovery, so each node
 shows up automatically as a device with its own sensors.
 
@@ -49,6 +49,9 @@ stale or garbage value) whenever the sensor node reports a failed DHT read.
 Boot Count
 Error
 Sequence
+SNR (dB, of the node's last packet)
+Packet Loss (%, of the node's last 100 expected packets, from gaps in
+`seq`; starts over when the node reboots)
 
 <img width="334" height="233" alt="diagnostic" src="https://github.com/user-attachments/assets/9dda212a-3eea-4a78-8e33-3c9b1c14ef37" />
 
@@ -67,7 +70,7 @@ The gateway also publishes its own diagnostic device, covering:
 - **Store-and-forward MQTT queue.** If the MQTT broker is unreachable, LoRa
   readings (and Home Assistant discovery messages) are queued instead of
   dropped, then flushed once the broker is reachable again. The queue is
-  bounded (20 messages); if it fills while still offline, the oldest entry
+  bounded (32 messages); if it fills while still offline, the oldest entry
   is dropped to make room for the newest.
 - **Non-blocking WiFi + MQTT reconnect.** Both connections are retried on
   their own backoff timers without blocking LoRa packet reception, so a

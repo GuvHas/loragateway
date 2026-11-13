@@ -35,8 +35,8 @@ public:
 
 class FakeLoRa : public gateway::ILoRaReceiver {
 public:
-    void push(const std::string& data, int rssi = -60) {
-        queue_.push_back(gateway::RawPacket{data, rssi});
+    void push(const std::string& data, int rssi = -60, float snr = 9.0f) {
+        queue_.push_back(gateway::RawPacket{data, rssi, snr});
     }
 
     bool receive(gateway::RawPacket& out) override {
