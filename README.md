@@ -91,7 +91,8 @@ Humidity
 Low Battery
 Signal
 Temperature
-<img width="330" height="332" alt="sensors" src="https://github.com/user-attachments/assets/e36319d5-3c55-4dd2-af00-ee542f39a500" />
+<img width="317" height="247" alt="image" src="https://github.com/user-attachments/assets/c99c4131-62ed-4262-bf31-27611e99d715" />
+
 
 Temperature/Humidity go `unknown` in Home Assistant (rather than showing a
 stale or garbage value) whenever the sensor node reports a failed DHT read.
@@ -104,7 +105,9 @@ SNR (dB, of the node's last packet)
 Packet Loss (%, of the node's last 100 expected packets, from gaps in
 `seq`; starts over when the node reboots)
 
-<img width="334" height="233" alt="diagnostic" src="https://github.com/user-attachments/assets/9dda212a-3eea-4a78-8e33-3c9b1c14ef37" />
+<img width="315" height="248" alt="image" src="https://github.com/user-attachments/assets/a6368658-6185-417a-8bdc-0929e41ba333" />
+
+
 
 ### Gateway diagnostics
 The gateway also publishes its own diagnostic device, covering:
