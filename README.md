@@ -55,6 +55,28 @@ Artifacts need a GitHub sign-in to download; the release does not.
    back by itself once the router is up, without a power cycle.
 4. Open `http://<gateway-ip>/devices` and approve your sensor nodes. They
    then appear in Home Assistant through MQTT discovery.
+5. Optionally give each approved node a name on the same page (see
+   "Naming nodes" below).
+
+## Naming nodes
+
+Nodes running current loratemp firmware identify themselves by their chip's
+MAC address, as `n-` plus 6 hex digits (for example `n-a1b2c3`), so every
+node can run the same firmware. To give one a readable name, type it in the
+field next to the node under **Approved Devices** on
+`http://<gateway-ip>/devices` and press **Save**.
+
+- The name becomes the device name in Home Assistant and the prefix of its
+  entity names ("Garage Temperature"). An empty name goes back to the id.
+- MQTT topics, unique ids and the Home Assistant device id stay on the node
+  id, so renaming keeps the node's entities and history. Entity ids that
+  Home Assistant already created are not renamed.
+- Names are stored on the gateway and survive restarts. Removing a node
+  forgets its name.
+- Up to 32 bytes; commas, `=` and control characters are dropped.
+
+Nodes built with a fixed `NodeId` (for example `GarageTemp`) keep using it,
+and can be named the same way.
 
 ## Supported packets
 
@@ -154,7 +176,8 @@ drops.
   set (e.g. from a rare over-the-air bit error).
 - **Device management.** New nodes appear as "pending" at
   `http://<gateway-ip>/devices` until approved, so only known nodes get
-  published and auto-discovered.
+  published and auto-discovered. Approved nodes can be given a friendly
+  name there.
 
 ## Architecture
 

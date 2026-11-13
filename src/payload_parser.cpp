@@ -19,7 +19,11 @@ constexpr size_t kSensorJsonCapacity = 512;
 // discovery tests deserializing and asserting on "sw" specifically. Still
 // needed even though per-node discovery no longer carries "sw" (see
 // buildEntityDiscovery()): this capacity is shared by both.
-constexpr size_t kDiscoveryJsonCapacity = 700;
+// 832, not 700: a friendly node name (up to kMaxNodeNameLength bytes, in
+// both the entity name and the device name) pushed 700 over the edge, and
+// node discovery carries "sw" again. test_parser's
+// test_build_auto_discovery_messages_fit_longest_display_name guards it.
+constexpr size_t kDiscoveryJsonCapacity = 832;
 
 // Falls back to "dev" only if scripts/inject_git_version.py's build flag
 // somehow didn't run (e.g. building outside PlatformIO, or the native test
@@ -200,6 +204,28 @@ std::string haSafeSlug(const std::string& raw) {
         out += toHex8(fnv1a32(raw));
     }
     return out;
+}
+
+std::string sanitizeNodeName(const std::string& raw) {
+    std::string kept;
+    for (char c : raw) {
+        unsigned char u = static_cast<unsigned char>(c);
+        if (u < 0x20 || u == 0x7f || c == ',' || c == '=') continue;
+        kept += c;
+    }
+    size_t first = kept.find_first_not_of(' ');
+    if (first == std::string::npos) return "";
+    size_t last = kept.find_last_not_of(' ');
+    kept = kept.substr(first, last - first + 1);
+    if (kept.size() > kMaxNodeNameLength) {
+        size_t cut = kMaxNodeNameLength;
+        // Back up to the start of the UTF-8 character the cut lands in.
+        while (cut > 0 && (static_cast<unsigned char>(kept[cut]) & 0xC0) == 0x80) cut--;
+        kept = kept.substr(0, cut);
+        size_t end = kept.find_last_not_of(' ');
+        kept = end == std::string::npos ? "" : kept.substr(0, end + 1);
+    }
+    return kept;
 }
 
 // ---------------------------------------------------------------------
@@ -564,7 +590,8 @@ MqttMessage buildEntityDiscovery(const std::string& component,
                                   const GatewayIdentity& gateway,
                                   const std::string& entCat = "",
                                   int precision = -1,
-                                  const std::string& swVersion = "") {
+                                  const std::string& swVersion = "",
+                                  const std::string& displayName = "") {
     // stateTopic must exactly match the topic decideRoute() actually
     // publishes readings to (which only guarantees MQTT-safety, not HA's
     // stricter discovery-topic charset) -- so it stays on the plain
@@ -577,8 +604,10 @@ MqttMessage buildEntityDiscovery(const std::string& component,
     std::string stateTopic = gateway.baseTopic + "/" + safeId;
     std::string availTopic = availabilityTopic(gateway.baseTopic);
 
+    const std::string& shownName = displayName.empty() ? nodeId : displayName;
+
     StaticJsonDocument<kDiscoveryJsonCapacity> doc;
-    doc["name"] = nodeId + " " + nameSuffix;
+    doc["name"] = shownName + " " + nameSuffix;
     doc["stat_t"] = stateTopic;
     doc["val_tpl"] = valTpl;
     if (!unit.empty()) doc["unit_of_meas"] = unit;
@@ -590,7 +619,7 @@ MqttMessage buildEntityDiscovery(const std::string& component,
 
     JsonObject dev = doc.createNestedObject("dev");
     dev["ids"] = "lora_" + haId;
-    dev["name"] = nodeId;
+    dev["name"] = shownName;
     dev["mdl"] = "LoRa Sensor Node";
     dev["mf"] = "DIY";
     dev["via_device"] = gateway.deviceName;
@@ -630,38 +659,39 @@ MqttMessage buildEntityDiscovery(const std::string& component,
 
 std::vector<MqttMessage> buildAutoDiscoveryMessages(const std::string& nodeId,
                                                      const GatewayIdentity& gateway,
-                                                     const std::string& swVersion) {
+                                                     const std::string& swVersion,
+                                                     const std::string& displayName) {
     std::vector<MqttMessage> messages;
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "t", "Temperature",
                                              "{{ value_json.t }}", "°C", "temperature", gateway, "", -1,
-                                             swVersion));
+                                             swVersion, displayName));
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "h", "Humidity",
                                              "{{ value_json.h }}", "%", "humidity", gateway, "", -1,
-                                             swVersion));
+                                             swVersion, displayName));
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "v", "Battery",
-                                             "{{ value_json.v }}", "V", "voltage", gateway, "", 2, swVersion));
+                                             "{{ value_json.v }}", "V", "voltage", gateway, "", 2, swVersion, displayName));
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "r", "Signal",
                                              "{{ value_json.rssi }}", "dBm", "signal_strength", gateway, "",
-                                             -1, swVersion));
+                                             -1, swVersion, displayName));
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "boot", "Boot Count",
                                              "{{ value_json.boot | default(0) }}", "restarts", "",
-                                             gateway, "diagnostic", -1, swVersion));
+                                             gateway, "diagnostic", -1, swVersion, displayName));
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "seq", "Sequence",
                                              "{{ value_json.seq | default(0) }}", "", "",
-                                             gateway, "diagnostic", -1, swVersion));
+                                             gateway, "diagnostic", -1, swVersion, displayName));
     messages.push_back(buildEntityDiscovery(
         "binary_sensor", nodeId, "lb", "Low Battery",
         "{{ 'ON' if value_json.lb is defined and value_json.lb == 1 else 'OFF' }}", "", "battery", gateway,
-        "", -1, swVersion));
+        "", -1, swVersion, displayName));
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "err", "Error",
                                              "{{ value_json.err | default('none', true) }}", "", "",
-                                             gateway, "diagnostic", -1, swVersion));
+                                             gateway, "diagnostic", -1, swVersion, displayName));
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "snr", "SNR", "{{ value_json.snr }}",
                                              "dB", "signal_strength", gateway, "diagnostic", -1,
-                                             swVersion));
+                                             swVersion, displayName));
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "loss", "Packet Loss",
                                              "{{ value_json.loss }}", "%", "", gateway, "diagnostic", 1,
-                                             swVersion));
+                                             swVersion, displayName));
     return messages;
 }
 

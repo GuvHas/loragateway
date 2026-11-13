@@ -242,6 +242,9 @@ void handleDevicesPage() {
   html += ".btn{padding:8px 16px;border:none;border-radius:4px;cursor:pointer;font-size:0.9em;text-decoration:none;color:#fff;}";
   html += ".approve{background:#27ae60;}.remove{background:#c0392b;}.clear{background:#2980b9;}";
   html += ".none{color:#666;font-style:italic;padding:10px;}";
+  html += ".dev form{display:flex;gap:6px;align-items:center;flex-wrap:wrap;}";
+  html += ".dev input[type=text]{padding:7px;border-radius:4px;border:1px solid #444;background:#0f1a30;color:#e0e0e0;}";
+  html += ".save{background:#2980b9;}.id{color:#888;font-size:0.85em;margin-left:6px;}";
   html += "a.back{color:#0fbcf9;display:inline-block;margin-top:15px;}";
   html += "</style></head><body>";
   html += "<h1>Device Management</h1>";
@@ -284,11 +287,27 @@ void handleDevicesPage() {
   if (orchestrator.allowList().entries().empty()) {
     html += "<div class='none'>No approved devices.</div>";
   } else {
+    // Each row has a name field: the friendly name Home Assistant shows for
+    // the node (see GatewayOrchestrator::setNodeName()). The id stays the
+    // key; a form field value only needs HTML-escaping, the browser encodes
+    // it for the request.
     for (const auto& entry : orchestrator.allowList().entries()) {
-      String name = String(gateway::htmlEscape(entry).c_str());
+      String id = String(gateway::htmlEscape(entry).c_str());
       String href = String(gateway::htmlEscape(gateway::urlEncodeComponent(entry)).c_str());
-      html += "<div class='dev'><span class='name'>" + name + "</span>";
-      html += "<a class='btn remove' href='/remove?id=" + href + "'>Remove</a></div>";
+      std::string friendly = orchestrator.nodeName(entry);
+      html += "<div class='dev'><span class='name'>";
+      if (friendly.empty()) {
+        html += id;
+      } else {
+        html += String(gateway::htmlEscape(friendly).c_str());
+        html += "<span class='id'>" + id + "</span>";
+      }
+      html += "</span><form method='post' action='/rename'>";
+      html += "<input type='hidden' name='id' value='" + id + "'>";
+      html += "<input type='text' name='name' maxlength='" + String(static_cast<unsigned>(gateway::kMaxNodeNameLength)) +
+              "' placeholder='Name in Home Assistant' value='" + String(gateway::htmlEscape(friendly).c_str()) + "'>";
+      html += "<button class='btn save' type='submit'>Save</button>";
+      html += "<a class='btn remove' href='/remove?id=" + href + "'>Remove</a></form></div>";
     }
   }
 
@@ -313,6 +332,15 @@ void handleRemove() {
   wm.server->send(302, "text/plain", "Redirecting...");
 }
 
+// Sets or clears an approved node's friendly name from the /devices form.
+void handleRename() {
+  if (wm.server->hasArg("id") && wm.server->hasArg("name")) {
+    orchestrator.setNodeName(wm.server->arg("id").c_str(), wm.server->arg("name").c_str());
+  }
+  wm.server->sendHeader("Location", "/devices", true);
+  wm.server->send(302, "text/plain", "Redirecting...");
+}
+
 // Forces every node to re-run Home Assistant auto-discovery on its next
 // packet (see GatewayOrchestrator::clearDiscoveredNodes()). Does not touch
 // the allowlist -- approved nodes stay approved, this only clears the
@@ -330,6 +358,7 @@ void registerWebRoutes() {
   wm.server->on("/devices", handleDevicesPage);
   wm.server->on("/approve", handleApprove);
   wm.server->on("/remove",  handleRemove);
+  wm.server->on("/rename",  handleRename);
   wm.server->on("/clear-discovered", handleClearDiscovered);
 }
 

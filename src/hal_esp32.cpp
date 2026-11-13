@@ -183,6 +183,14 @@ void Esp32NodeStore::saveNodeVersionsCsv(const std::string& csv) {
     prefs_.putString("swver", csv.c_str());
 }
 
+std::string Esp32NodeStore::loadNodeNamesCsv() {
+    return std::string(prefs_.getString("names", "").c_str());
+}
+
+void Esp32NodeStore::saveNodeNamesCsv(const std::string& csv) {
+    prefs_.putString("names", csv.c_str());
+}
+
 // ---------------------------------------------------------------------
 // Esp32Display
 // ---------------------------------------------------------------------

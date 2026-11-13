@@ -430,6 +430,61 @@ static void test_build_auto_discovery_messages_includes_known_sw_version(void) {
     TEST_ASSERT_EQUAL_STRING("a1b2c3d", doc["dev"]["sw"].as<const char*>());
 }
 
+// A friendly name replaces the id in the device name and entity names only;
+// topics, unique ids and the device id stay on the node id.
+static void test_build_auto_discovery_messages_uses_display_name(void) {
+    GatewayIdentity gateway{"LoRaGateway", "lora/incoming"};
+    std::vector<MqttMessage> messages = buildAutoDiscoveryMessages("n-a1b2c3", gateway, "", "Garage");
+
+    StaticJsonDocument<1024> doc;
+    TEST_ASSERT_FALSE(deserializeJson(doc, messages[0].payload));
+    TEST_ASSERT_EQUAL_STRING("Garage Temperature", doc["name"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("Garage", doc["dev"]["name"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("lora_n-a1b2c3_t", doc["uniq_id"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("lora_n-a1b2c3", doc["dev"]["ids"].as<const char*>());
+    TEST_ASSERT_EQUAL_STRING("lora/incoming/n-a1b2c3", doc["stat_t"].as<const char*>());
+}
+
+// ArduinoJson drops fields silently when the document is full, so every
+// config is built with the longest name and a version, then checked for the
+// fields added last.
+static void test_build_auto_discovery_messages_fit_longest_display_name(void) {
+    GatewayIdentity gateway{"LoRaGateway", "lora/incoming"};
+    std::string longName(kMaxNodeNameLength, 'N');
+    std::vector<MqttMessage> messages =
+        buildAutoDiscoveryMessages("ToolroomTemp", gateway, "fde884a", longName);
+
+    for (const auto& msg : messages) {
+        StaticJsonDocument<1536> doc;
+        TEST_ASSERT_FALSE(deserializeJson(doc, msg.payload));
+        TEST_ASSERT_EQUAL_STRING(longName.c_str(), doc["dev"]["name"].as<const char*>());
+        TEST_ASSERT_EQUAL_STRING("fde884a", doc["dev"]["sw"].as<const char*>());
+        TEST_ASSERT_EQUAL_STRING("LoRaGateway", doc["dev"]["via_device"].as<const char*>());
+        TEST_ASSERT_TRUE(doc.containsKey("avty_t"));
+    }
+}
+
+static void test_sanitize_node_name(void) {
+    TEST_ASSERT_EQUAL_STRING("Garage", sanitizeNodeName("  Garage  ").c_str());
+    TEST_ASSERT_EQUAL_STRING("ab", sanitizeNodeName("a,=b").c_str());
+    TEST_ASSERT_EQUAL_STRING("ab", sanitizeNodeName("a\n\tb\x7f").c_str());
+    TEST_ASSERT_EQUAL_STRING("", sanitizeNodeName("   ").c_str());
+    TEST_ASSERT_EQUAL_STRING("Växthus", sanitizeNodeName("Växthus").c_str());
+
+    std::string tooLong(kMaxNodeNameLength + 10, 'x');
+    TEST_ASSERT_EQUAL_UINT32(kMaxNodeNameLength, sanitizeNodeName(tooLong).size());
+
+    // A cut inside a two-byte UTF-8 character drops the whole character.
+    std::string utf8(kMaxNodeNameLength - 1, 'x');
+    utf8 += "\xc3\xa4"; // 'ä'
+    TEST_ASSERT_EQUAL_STRING(std::string(kMaxNodeNameLength - 1, 'x').c_str(), sanitizeNodeName(utf8).c_str());
+
+    // Trailing space left by the cut is trimmed too.
+    std::string spaced(kMaxNodeNameLength - 1, 'x');
+    spaced += " yyy";
+    TEST_ASSERT_EQUAL_STRING(std::string(kMaxNodeNameLength - 1, 'x').c_str(), sanitizeNodeName(spaced).c_str());
+}
+
 static void test_build_gateway_discovery_messages_covers_diagnostics(void) {
     GatewayIdentity gateway{"LoRaGateway", "lora/incoming"};
     std::vector<MqttMessage> messages = buildGatewayDiscoveryMessages(gateway);
@@ -925,6 +980,9 @@ int main(int argc, char** argv) {
     RUN_TEST(test_build_gateway_command_discovery_messages_covers_restart_button);
     RUN_TEST(test_build_auto_discovery_messages_sanitizes_ha_illegal_characters);
     RUN_TEST(test_build_gateway_discovery_messages_sanitizes_ha_illegal_characters);
+    RUN_TEST(test_build_auto_discovery_messages_uses_display_name);
+    RUN_TEST(test_build_auto_discovery_messages_fit_longest_display_name);
+    RUN_TEST(test_sanitize_node_name);
     RUN_TEST(test_build_gateway_status_message);
 
     return UNITY_END();

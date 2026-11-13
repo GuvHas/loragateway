@@ -134,8 +134,8 @@ private:
     std::map<std::string, MessageCallback> subscriptions_;
 };
 
-// Wraps Preferences for the "allow" (allowlist CSV) and "swver" (per-node
-// firmware version CSV) keys.
+// Wraps Preferences for the "allow" (allowlist CSV), "swver" (per-node
+// firmware version CSV) and "names" (per-node friendly name CSV) keys.
 class Esp32NodeStore : public INodeStore {
 public:
     explicit Esp32NodeStore(Preferences& prefs);
@@ -144,6 +144,8 @@ public:
     void saveAllowListCsv(const std::string& csv) override;
     std::string loadNodeVersionsCsv() override;
     void saveNodeVersionsCsv(const std::string& csv) override;
+    std::string loadNodeNamesCsv() override;
+    void saveNodeNamesCsv(const std::string& csv) override;
 
 private:
     Preferences& prefs_;

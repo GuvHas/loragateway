@@ -917,6 +917,180 @@ static void test_sw_change_during_in_flight_discovery_is_applied_once_batch_comp
 }
 
 // ---------------------------------------------------------------------
+// Friendly node names set on the /devices page
+// ---------------------------------------------------------------------
+
+static void test_node_name_republishes_discovery_with_name(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+    loRa.push(kKitchenSuccessPayload);
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size());
+
+    TEST_ASSERT_TRUE(orchestrator.setNodeName("kitchen", "Kitchen Window"));
+    TEST_ASSERT_EQUAL_STRING("Kitchen Window", orchestrator.nodeName("kitchen").c_str());
+    TEST_ASSERT_EQUAL_STRING("kitchen=Kitchen Window", store.nodeNamesCsv_.c_str());
+
+    // A fresh discovery batch with the new name; unique ids stay on the id.
+    TEST_ASSERT_EQUAL_UINT32(2 * kD + 1, mqtt.published.size());
+    for (size_t i = kD + 1; i < 2 * kD + 1; ++i) {
+        const std::string& payload = mqtt.published[i].payload;
+        TEST_ASSERT_TRUE(payload.find("\"name\":\"Kitchen Window") != std::string::npos);
+        TEST_ASSERT_TRUE(payload.find("\"uniq_id\":\"lora_kitchen_") != std::string::npos);
+    }
+
+    // Setting the same name again changes nothing.
+    TEST_ASSERT_FALSE(orchestrator.setNodeName("kitchen", "  Kitchen Window "));
+    TEST_ASSERT_EQUAL_UINT32(2 * kD + 1, mqtt.published.size());
+}
+
+static void test_node_name_cleared_goes_back_to_id(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    store.nodeNamesCsv_ = "kitchen=Kitchen Window";
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+    // Loaded from the store at begin(), and used for the first discovery.
+    TEST_ASSERT_EQUAL_STRING("Kitchen Window", orchestrator.nodeName("kitchen").c_str());
+    loRa.push(kKitchenSuccessPayload);
+    orchestrator.tick();
+    TEST_ASSERT_TRUE(mqtt.published[0].payload.find("\"Kitchen Window\"") != std::string::npos);
+
+    TEST_ASSERT_TRUE(orchestrator.setNodeName("kitchen", ""));
+    TEST_ASSERT_EQUAL_STRING("", orchestrator.nodeName("kitchen").c_str());
+    TEST_ASSERT_EQUAL_STRING("", store.nodeNamesCsv_.c_str());
+    TEST_ASSERT_EQUAL_UINT32(2 * kD + 1, mqtt.published.size());
+    TEST_ASSERT_TRUE(mqtt.published[kD + 1].payload.find("\"name\":\"kitchen Temperature\"") !=
+                     std::string::npos);
+}
+
+static void test_node_name_rejected_for_unapproved_node(void) {
+    FakeWifiRadio wifi;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+    TEST_ASSERT_FALSE(orchestrator.setNodeName("garage", "Garage"));
+    TEST_ASSERT_EQUAL_INT(0, store.nodeNamesSaveCount);
+}
+
+static void test_node_name_before_first_packet_is_used_by_first_discovery(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+    TEST_ASSERT_TRUE(orchestrator.setNodeName("kitchen", "Kitchen"));
+    TEST_ASSERT_EQUAL_UINT32(0, mqtt.published.size()); // not discovered yet: nothing to republish
+
+    loRa.push(kKitchenSuccessPayload);
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, mqtt.published.size());
+    TEST_ASSERT_TRUE(mqtt.published[0].payload.find("\"name\":\"Kitchen Temperature\"") !=
+                     std::string::npos);
+}
+
+static void test_node_name_during_in_flight_discovery_is_applied_once_batch_completes(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connectShouldSucceed = false;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+    loRa.push(kKitchenSuccessPayload);
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, orchestrator.queuedMessageCount());
+
+    TEST_ASSERT_TRUE(orchestrator.setNodeName("kitchen", "Kitchen"));
+    TEST_ASSERT_EQUAL_UINT32(kD + 1, orchestrator.queuedMessageCount()); // deferred, not queued twice
+
+    mqtt.connectShouldSucceed = true;
+    clock.advance(gateway::GatewayOrchestrator::kDefaultMqttReconnectBackoffMs);
+    orchestrator.tick();
+    // The old batch completes before its queued state message goes out, so
+    // the renamed batch comes straight after it.
+    TEST_ASSERT_EQUAL_UINT32(2 * kD + 1, mqtt.published.size());
+    for (size_t i = kD; i < 2 * kD; ++i) {
+        TEST_ASSERT_TRUE(mqtt.published[i].payload.find("\"Kitchen\"") != std::string::npos);
+    }
+}
+
+// Codex review on PR #32: an id may contain '=', so the persisted
+// "id=name" entry must still map back to the full id after a restart.
+static void test_node_name_survives_restart_for_id_containing_equals(void) {
+    FakeWifiRadio wifi;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    FakeStore store("sensor=1");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator first(wifi, loRa, mqtt, store, display, clock, "LoRaGateway",
+                                        "lora/incoming");
+    first.begin();
+    TEST_ASSERT_TRUE(first.setNodeName("sensor=1", "Garage"));
+
+    gateway::GatewayOrchestrator restarted(wifi, loRa, mqtt, store, display, clock, "LoRaGateway",
+                                            "lora/incoming");
+    restarted.begin();
+    TEST_ASSERT_EQUAL_STRING("Garage", restarted.nodeName("sensor=1").c_str());
+    TEST_ASSERT_EQUAL_STRING("", restarted.nodeName("sensor").c_str());
+}
+
+static void test_remove_node_forgets_its_name(void) {
+    FakeWifiRadio wifi;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+    TEST_ASSERT_TRUE(orchestrator.setNodeName("kitchen", "Kitchen"));
+    TEST_ASSERT_TRUE(orchestrator.removeNode("kitchen"));
+    TEST_ASSERT_EQUAL_STRING("", orchestrator.nodeName("kitchen").c_str());
+    TEST_ASSERT_EQUAL_STRING("", store.nodeNamesCsv_.c_str());
+}
+
+// ---------------------------------------------------------------------
 // MQTT disconnect handling: queue while offline, respect backoff, flush
 // on reconnect.
 // ---------------------------------------------------------------------
@@ -1931,6 +2105,13 @@ int main(int argc, char** argv) {
     RUN_TEST(test_learned_sw_version_is_persisted_and_survives_restart);
     RUN_TEST(test_sw_reported_before_approval_is_not_lost);
     RUN_TEST(test_sw_change_during_in_flight_discovery_is_applied_once_batch_completes);
+    RUN_TEST(test_node_name_republishes_discovery_with_name);
+    RUN_TEST(test_node_name_cleared_goes_back_to_id);
+    RUN_TEST(test_node_name_rejected_for_unapproved_node);
+    RUN_TEST(test_node_name_before_first_packet_is_used_by_first_discovery);
+    RUN_TEST(test_node_name_during_in_flight_discovery_is_applied_once_batch_completes);
+    RUN_TEST(test_node_name_survives_restart_for_id_containing_equals);
+    RUN_TEST(test_remove_node_forgets_its_name);
 
     RUN_TEST(test_offline_packets_are_queued_not_lost);
     RUN_TEST(test_two_new_nodes_fit_in_offline_queue);

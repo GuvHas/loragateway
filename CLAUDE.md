@@ -64,6 +64,9 @@ manual check for the owner.
 ```
 
 - `t`, `h` and `v` are numbers or `null`. `lb` is 0 or 1. `err` is a string.
+- `id` is either a fixed `NodeId` or, by default on current loratemp, `n-`
+  plus the last 3 bytes of the node's MAC in lowercase hex. The gateway
+  treats both the same; a friendly name is set on `/devices`.
 - `boot` counts wake-ups since the node last lost power. The node increments it
   before sending, so `boot` is 1 on the first packet after a flash or battery
   swap.
@@ -147,7 +150,7 @@ Radio settings must match on both sides: 868 MHz, spreading factor 9, CRC on.
   discovery topic or unique id, and `htmlEscape()` / `urlEncodeComponent()`
   before any web page.
 - **ArduinoJson drops fields silently when a document is full.** Discovery
-  documents use `kDiscoveryJsonCapacity` (700). When a field is added, the test
+  documents use `kDiscoveryJsonCapacity` (832). When a field is added, the test
   must deserialize the payload and assert on that field.
 - **Leaving a key out does not clear it in Home Assistant.** Home Assistant
   merges device info across the configs that share a device id. Node discovery
@@ -178,7 +181,18 @@ Radio settings must match on both sides: 868 MHz, spreading factor 9, CRC on.
   `std::function` on ESP32 and needs none.
 - **The restart handler clears the retained command first.** A retained
   `PRESS` would otherwise restart the gateway on every reconnect.
-- **Preferences key names are limited to 15 characters.**
+- **Preferences key names are limited to 15 characters.** Keys in use:
+  `allow` (allowlist), `swver` (node versions), `names` (node names), plus
+  the settings `main.cpp` saves in the same `loraconf` namespace
+  (`server`, `port`, `user`, `pass`, `topic`, `devname`). Pick a new key that
+  does not collide.
+- **A friendly name never replaces the node id as a key.** `setNodeName()`
+  changes only the discovery `name` and `dev.name`; topics, `uniq_id` and
+  `dev.ids` stay on the id, so a rename keeps the entities in Home
+  Assistant. Names go through `sanitizeNodeName()` (no `,` or `=`, which the
+  CSV persistence uses, at most `kMaxNodeNameLength` bytes) and through
+  `htmlEscape()` on the web page. A rename republishes discovery through
+  `requestRediscovery()`, deferred while a batch is in flight.
 - **Publish only when `online()`, never on `mqtt.connected()` alone.**
   PubSubClient keeps reporting connected over a dead socket after WiFi drops,
   and each write into it can block for 10 s, enough to trip the 30 s watchdog

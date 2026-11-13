@@ -94,6 +94,12 @@ public:
     // save/load pair -- GatewayOrchestrator treats it as an opaque blob.
     virtual std::string loadNodeVersionsCsv() = 0;
     virtual void saveNodeVersionsCsv(const std::string& csv) = 0;
+
+    // Persists the friendly name set for each node on the /devices page
+    // (see GatewayOrchestrator::setNodeName()). Opaque to the store, like
+    // the versions blob above.
+    virtual std::string loadNodeNamesCsv() = 0;
+    virtual void saveNodeNamesCsv(const std::string& csv) = 0;
 };
 
 class IDisplay {
