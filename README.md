@@ -8,31 +8,82 @@ shows up automatically as a device with its own sensors.
 
 ## Download Latest Firmware
 
-Every push to `main` automatically builds the firmware and attaches it as a
-downloadable artifact — no local PlatformIO setup needed to get a flashable
-binary. The badge above shows whether the latest build succeeded.
+Every push to `main` builds the firmware and publishes it to the
+[**firmware-latest** release](https://github.com/GuvHas/loragateway/releases/tag/firmware-latest).
+No GitHub account or local PlatformIO setup is needed. The badge above shows
+whether the latest build succeeded.
 
-**This is an application-image update, not a full/blank-chip flash.** The
-artifact contains only `firmware.bin` — no bootloader or partition-table
-binaries — so it only works on a board that already has this project's
-bootloader and partition layout on it (e.g. one that's ever been flashed via
-`pio run -e ttgo-lora32-v21 -t upload`, which writes all three at first
-flash). Setting up a brand-new/erased board still needs that full PlatformIO
-upload once; after that, this artifact can be used for updates.
+| File | Use it for | Flash at |
+| --- | --- | --- |
+| [`firmware.bin`](https://github.com/GuvHas/loragateway/releases/download/firmware-latest/firmware.bin) | Updating a gateway that already runs this project, over USB or OTA | `0x10000` |
+| [`firmware-full.bin`](https://github.com/GuvHas/loragateway/releases/download/firmware-latest/firmware-full.bin) | A blank or erased board, or after a partition table change: bootloader, partition table and app in one image | `0x0` |
 
-1. Open the [`build-artifact.yml` workflow runs page](https://github.com/GuvHas/loragateway/actions/workflows/build-artifact.yml).
-2. Click the topmost run (it's the latest build off `main`; a green check
-   means it succeeded).
-3. Scroll down to the **Artifacts** section at the bottom of the run page.
-4. Download the `firmware-<commit-sha>` zip and unzip it — it contains
-   `firmware.bin`. Flash it at the application offset (`0x10000` on this
-   board) with `esptool.py --chip esp32 write_flash 0x10000 firmware.bin`,
-   or drop it in place of `.pio/build/ttgo-lora32-v21/firmware.bin` and run
-   the PlatformIO upload tools.
+```sh
+# Update an existing gateway
+esptool.py --chip esp32 write_flash 0x10000 firmware.bin
 
-Note: downloading workflow artifacts requires being signed in to GitHub, since
-that's a GitHub-wide restriction on Actions artifacts, not something this repo
-can turn off.
+# Set up a new board
+esptool.py --chip esp32 write_flash 0x0 firmware-full.bin
+```
+
+Without installing anything, Espressif's browser flasher
+[esptool-js](https://espressif.github.io/esptool-js/) (Chrome or Edge) can
+write either file: connect, pick the file and enter its offset. The release also has
+`flash-offsets.txt`, listing what is inside the full image.
+
+Each pull request builds the same files as a workflow artifact, on the run's
+page under **Artifacts**, for testing a change before it is merged.
+Artifacts need a GitHub sign-in to download; the release does not.
+
+> **Upgrading from a build before the move to platform 8.0.0 (#27)?** The
+> firmware now uses the `min_spiffs.csv` partition table (two 1.9 MB OTA
+> slots), because Arduino core 3.x outgrew the default app partition. A
+> partition table change can't be applied by OTA or by flashing
+> `firmware.bin` alone, so flash `firmware-full.bin` at `0x0` over USB once
+> (or run `pio run -e ttgo-lora32-v21 -t upload`). Later updates can use
+> `firmware.bin` or OTA again.
+
+## First setup
+
+1. Flash `firmware-full.bin` over USB (see above).
+2. On first boot, with no saved WiFi, the gateway opens a setup portal as the
+   access point `LoRaGateway-Setup`. Connect to it and enter your WiFi and
+   MQTT broker details.
+3. The portal closes after 5 minutes (it stays open while a phone is
+   connected), and the gateway keeps trying to join the saved network on its
+   own. A gateway that boots during a power or network outage therefore comes
+   back by itself once the router is up, without a power cycle.
+4. Open `http://<gateway-ip>/devices` and approve your sensor nodes. They
+   then appear in Home Assistant through MQTT discovery.
+
+## Supported packets
+
+The gateway accepts two packet formats from the
+[loratemp](https://github.com/GuvHas/loratemp) nodes and treats them the same:
+
+- **Binary frame v1** (default on loratemp since #18): 24 bytes for a typical
+  reading, about 206 ms on air at SF9.
+- **JSON**, e.g.
+  `{"id":"GarageTemp","t":21.5,"h":55.2,"v":3.90,"boot":7,"seq":4,"lb":0,"err":"none","sw":"fde884a"}`
+  (about 83 bytes, 472 ms on air).
+
+The first byte decides: `0xC1` is a binary frame, anything else is parsed as
+JSON. Both formats stay supported, so nodes can be reflashed one at a time.
+The byte layout is in [CLAUDE.md](CLAUDE.md#binary-frame-v1). Radio settings
+must match the nodes: 868 MHz, spreading factor 9, CRC on.
+
+## Home Assistant entities
+
+<!--
+  SCREENSHOT PLACEHOLDER: insert a new screenshot of the Home Assistant
+  device page for a node here, showing the sensors and the diagnostic
+  entities (including SNR and Packet Loss, added in #30). Upload the image
+  by dragging it into a GitHub comment or edit box, then replace the line
+  below with the generated <img> tag or an ![...](...) link. The two older
+  screenshots further down can be removed once this one is in.
+
+  ![Home Assistant sensors for a LoRa node](docs/ha-node-sensors.png)
+-->
 
 ### Sensors created (per node)
 Battery
@@ -64,6 +115,15 @@ The gateway also publishes its own diagnostic device, covering:
   "Resilience" below)
 - Packets Dropped — messages permanently discarded because that queue
   filled up while still offline
+- Uptime
+- A **Restart** button
+
+The gateway state JSON on `<base>/gateway/state` (base topic
+`lora/incoming` by default) also carries `wifi_reconnects` (how many times
+WiFi has been recovered since boot) and `wifi_disc_reason` (the ESP-IDF
+reason code of the last WiFi disconnect). They have no Home Assistant entity
+yet; read them with an MQTT client or a template sensor when chasing WiFi
+drops.
 
 ## Resilience
 
@@ -74,7 +134,14 @@ The gateway also publishes its own diagnostic device, covering:
   is dropped to make room for the newest.
 - **Non-blocking WiFi + MQTT reconnect.** Both connections are retried on
   their own backoff timers without blocking LoRa packet reception, so a
-  dropped router/AP or broker doesn't stall the gateway.
+  dropped router/AP or broker doesn't stall the gateway. WiFi retries back
+  off from 10 s to 60 s, every third attempt fully resets the WiFi radio, and
+  after 10 minutes offline the gateway restarts itself. Nothing is published
+  while WiFi is down, so a dead MQTT socket can't block long enough to trip
+  the 30 s watchdog.
+- **Setup portal timeout.** If the gateway boots without WiFi, the setup
+  portal closes after 5 minutes and normal WiFi recovery takes over, so the
+  gateway doesn't stay offline until someone power-cycles it.
 - **Untrusted-input hardening.** LoRa has no authentication, so a node id
   is treated as attacker-controlled: it's sanitized before use in MQTT
   topics, escaped before rendering on the device-management web page, and
@@ -105,7 +172,9 @@ hardware so it can be unit tested off-target:
 
 ## Building & testing
 
-This is a [PlatformIO](https://platformio.org/) project.
+This is a [PlatformIO](https://platformio.org/) project. The ESP32 platform is
+pinned to `espressif32 @ 8.0.0` (Arduino core 3.x, ESP-IDF 5), the same
+version as loratemp.
 
 ```sh
 # Native unit tests (no hardware required)
@@ -114,5 +183,9 @@ pio test -e native
 # Build firmware for the TTGO LoRa32 v2.1
 pio run -e ttgo-lora32-v21
 ```
+
+CI runs both on every push and pull request. [CLAUDE.md](CLAUDE.md) has the
+full payload contract, MQTT topic list and a troubleshooting checklist for a
+node that doesn't show up in Home Assistant.
 
 Sensor repo: https://github.com/GuvHas/loratemp
