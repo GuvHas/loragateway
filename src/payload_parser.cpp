@@ -317,6 +317,113 @@ ParseResult parseSensorPayload(const std::string& json) {
 }
 
 // ---------------------------------------------------------------------
+// Binary frame v1
+// ---------------------------------------------------------------------
+
+namespace {
+
+constexpr uint8_t kFlagLowBattery = 0x01;
+constexpr uint8_t kFlagSensorError = 0x02;
+constexpr uint8_t kFlagSwPresent = 0x04;
+constexpr int16_t kNullTemperature = INT16_MIN;   // 0x8000
+constexpr uint16_t kNullHumidity = 0xFFFF;
+// Bytes after the id: boot (3), seq (3), t (2), h (2), v (1).
+constexpr size_t kFixedFieldBytes = 11;
+
+uint32_t readU24(const uint8_t* p) {
+    return static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+           (static_cast<uint32_t>(p[2]) << 16);
+}
+
+uint16_t readU16(const uint8_t* p) {
+    return static_cast<uint16_t>(p[0] | (p[1] << 8));
+}
+
+}  // namespace
+
+ParseResult parseBinarySensorFrame(const uint8_t* data, size_t length) {
+    ParseResult result;
+    if (length < 3 || data[0] != kBinaryFrameV1Magic) {
+        result.error = ParseError::BadFrame;
+        return result;
+    }
+    const uint8_t flags = data[1];
+    const size_t idLen = data[2];
+    const size_t fixedEnd = 3 + idLen + kFixedFieldBytes;
+    const bool hasSw = (flags & kFlagSwPresent) != 0;
+
+    // Exact length check before reading anything past the header.
+    size_t swLen = 0;
+    if (hasSw) {
+        if (length < fixedEnd + 1) {
+            result.error = ParseError::BadFrame;
+            return result;
+        }
+        swLen = data[fixedEnd];
+        if (swLen == 0 || length != fixedEnd + 1 + swLen) {
+            result.error = ParseError::BadFrame;
+            return result;
+        }
+    } else if (length != fixedEnd) {
+        result.error = ParseError::BadFrame;
+        return result;
+    }
+
+    std::string sanitizedId = sanitizeMqttTopicSegment(
+        std::string(reinterpret_cast<const char*>(data + 3), idLen));
+    if (sanitizedId.empty()) {
+        result.error = ParseError::EmptyId;
+        return result;
+    }
+
+    const uint8_t* p = data + 3 + idLen;
+    SensorReading reading;
+    reading.id = sanitizedId;
+    reading.bootCount = readU24(p);
+    reading.seq = readU24(p + 3);
+    reading.hasSeq = true;
+
+    int16_t t = static_cast<int16_t>(readU16(p + 6));
+    if (t != kNullTemperature) reading.temperatureC = static_cast<float>(t) / 10.0f;
+    uint16_t h = readU16(p + 8);
+    if (h != kNullHumidity) reading.humidityPct = static_cast<float>(h) / 10.0f;
+    // 10 mV steps from 2.00 V. Divided as millivolts so the float is the
+    // nearest one to the decimal value, matching what the JSON parser gets
+    // from "3.90" and keeping the MQTT state message byte-identical.
+    reading.batteryVoltage = static_cast<float>(2000 + 10 * p[10]) / 1000.0f;
+
+    reading.lowBattery = (flags & kFlagLowBattery) != 0;
+    reading.rawErr = (flags & kFlagSensorError) ? "dht" : "none";
+    reading.err = parseSensorError(reading.rawErr);
+
+    if (hasSw) {
+        reading.swVersion = std::string(reinterpret_cast<const char*>(data + fixedEnd + 1), swLen);
+    }
+
+    result.reading = reading;
+    return result;
+}
+
+ParseResult parseSensorPacket(const std::string& raw) {
+    if (!raw.empty() && static_cast<uint8_t>(raw[0]) == kBinaryFrameV1Magic) {
+        return parseBinarySensorFrame(reinterpret_cast<const uint8_t*>(raw.data()), raw.size());
+    }
+    return parseSensorPayload(raw);
+}
+
+std::string unparsedPacketPayload(const std::string& raw) {
+    if (raw.empty() || static_cast<uint8_t>(raw[0]) != kBinaryFrameV1Magic) return raw;
+    static const char* kHex = "0123456789abcdef";
+    std::string out;
+    out.reserve(raw.size() * 2);
+    for (unsigned char c : raw) {
+        out.push_back(kHex[c >> 4]);
+        out.push_back(kHex[c & 0x0F]);
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------
 // AllowList
 // ---------------------------------------------------------------------
 

@@ -68,6 +68,7 @@ enum class ParseError {
     MissingId,     // "id" key absent
     EmptyId,       // "id" present but blank, or blank after sanitization
     WrongType,     // a known field had a JSON type that doesn't fit its contract
+    BadFrame,      // binary frame whose length doesn't match its own header
 };
 
 struct ParseResult {
@@ -83,6 +84,28 @@ struct ParseResult {
 // ParseError::WrongType rather than silently coerced.
 ParseResult parseSensorPayload(const char* json, size_t length);
 ParseResult parseSensorPayload(const std::string& json);
+
+// First byte of a version-1 binary sensor frame. Never '{', so one byte
+// tells the two formats apart.
+constexpr uint8_t kBinaryFrameV1Magic = 0xC1;
+
+// Decodes a version-1 binary sensor frame (layout in CLAUDE.md, "Binary
+// frame v1") into the same SensorReading the JSON parser produces, so
+// everything downstream -- dedup, discovery, the MQTT state message -- is
+// identical for both formats. The frame's length must match its header
+// exactly (ParseError::BadFrame otherwise). Reserved flag bits are ignored.
+ParseResult parseBinarySensorFrame(const uint8_t* data, size_t length);
+
+// Entry point for a received LoRa packet: a binary frame if the first byte
+// is kBinaryFrameV1Magic, otherwise the JSON payload. Nodes migrate one at a
+// time, so both formats are accepted indefinitely.
+ParseResult parseSensorPacket(const std::string& raw);
+
+// What to publish on the base topic for a packet that failed to parse: the
+// raw bytes for a JSON-looking packet (as before), lowercase hex for a
+// binary frame, whose NUL and non-printable bytes an MQTT client would cut
+// short or garble.
+std::string unparsedPacketPayload(const std::string& raw);
 
 // ---------------------------------------------------------------------
 // String sanitizers (close the topic-injection / stored-XSS gaps)

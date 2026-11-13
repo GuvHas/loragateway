@@ -1008,6 +1008,65 @@ static void test_malformed_packet_is_queued_to_base_topic_when_offline(void) {
 }
 
 // ---------------------------------------------------------------------
+// Binary frame v1: decoded into the same reading, published the same way.
+// ---------------------------------------------------------------------
+
+// kKitchenSuccessPayload as a binary frame: id "kitchen", boot 12, seq 10,
+// t 22.5 (225), h 45.0 (450), v 4.10 ((4100 - 2000) / 10 = 210).
+const std::string kKitchenBinaryFrame(
+    "\xC1\x00\x07kitchen\x0C\x00\x00\x0A\x00\x00\xE1\x00\xC2\x01\xD2", 21);
+
+static std::string publishedStateFor(const std::string& packet) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+    loRa.push(packet, -72);
+    orchestrator.tick();
+    if (mqtt.published.empty()) return "";
+    const auto& msg = mqtt.published.back();
+    return msg.topic + " " + msg.payload;
+}
+
+static void test_binary_frame_publishes_same_state_as_json(void) {
+    std::string fromJson = publishedStateFor(kKitchenSuccessPayload);
+    std::string fromBinary = publishedStateFor(kKitchenBinaryFrame);
+    TEST_ASSERT_TRUE(fromJson.rfind("lora/incoming/kitchen ", 0) == 0);
+    TEST_ASSERT_EQUAL_STRING(fromJson.c_str(), fromBinary.c_str());
+}
+
+// A broken binary frame still goes to the base topic, as text: raw bytes
+// with NULs would be cut short or unreadable in an MQTT client.
+static void test_malformed_binary_frame_forwarded_as_hex(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connectShouldSucceed = false;
+    FakeStore store;
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    loRa.push(std::string("\xC1\x00\x07", 3));
+    orchestrator.tick();
+
+    TEST_ASSERT_EQUAL_UINT32(1, orchestrator.queuedMessageCount());
+    TEST_ASSERT_EQUAL_STRING("lora/incoming", orchestrator.pendingQueue().front().topic.c_str());
+    TEST_ASSERT_EQUAL_STRING("c10007", orchestrator.pendingQueue().front().payload.c_str());
+}
+
+// ---------------------------------------------------------------------
 // Queue overrun: drop oldest once the bound is exceeded, and count it.
 // ---------------------------------------------------------------------
 
@@ -1750,6 +1809,8 @@ int main(int argc, char** argv) {
     RUN_TEST(test_offline_packets_are_queued_not_lost);
     RUN_TEST(test_reconnect_backoff_is_respected_then_flushes_queue);
     RUN_TEST(test_malformed_packet_is_queued_to_base_topic_when_offline);
+    RUN_TEST(test_binary_frame_publishes_same_state_as_json);
+    RUN_TEST(test_malformed_binary_frame_forwarded_as_hex);
 
     RUN_TEST(test_queue_overrun_drops_oldest_and_counts_dropped);
     RUN_TEST(test_evicted_discovery_is_regenerated_on_next_packet);

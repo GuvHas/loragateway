@@ -552,8 +552,179 @@ static void test_build_gateway_status_message(void) {
     TEST_ASSERT_EQUAL_INT(200, doc["wifi_disc_reason"].as<int>());
 }
 
+// ---------------------------------------------------------------------
+// Binary sensor frame, version 1 (see CLAUDE.md "Binary frame v1").
+// The hex vectors here are the golden vectors loratemp's encoder must
+// reproduce byte for byte.
+// ---------------------------------------------------------------------
+
+static std::string fromHex(const char* hex) {
+    std::string out;
+    auto nibble = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    int hi = -1;
+    for (const char* p = hex; *p; ++p) {
+        int v = nibble(*p);
+        if (v < 0) continue;  // spaces allowed for readability
+        if (hi < 0) { hi = v; } else { out.push_back(static_cast<char>((hi << 4) | v)); hi = -1; }
+    }
+    return out;
+}
+
+// GarageTemp, t 21.5, h 55.2, v 3.90, boot 7, seq 4, no flags.
+static const char* kVectorHealthy =
+    "C1 00 0A 47617261676554656D70 070000 040000 D700 2802 BE";
+// ToolroomTemp, DHT failed (t/h null), low battery, v 3.25, boot 1, seq 1,
+// sw "49a521c".
+static const char* kVectorDhtFailLowBatSw =
+    "C1 07 0C 546F6F6C726F6F6D54656D70 010000 010000 0080 FFFF 7D 07 34396135323163";
+
+static void test_binary_healthy_frame_decodes(void) {
+    ParseResult result = parseSensorPacket(fromHex(kVectorHealthy));
+
+    TEST_ASSERT_TRUE(result.ok());
+    TEST_ASSERT_EQUAL_STRING("GarageTemp", result.reading.id.c_str());
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 21.5f, *result.reading.temperatureC);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 55.2f, *result.reading.humidityPct);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 3.90f, *result.reading.batteryVoltage);
+    TEST_ASSERT_EQUAL_UINT32(7, result.reading.bootCount);
+    TEST_ASSERT_EQUAL_UINT32(4, result.reading.seq);
+    TEST_ASSERT_TRUE(result.reading.hasSeq);
+    TEST_ASSERT_FALSE(result.reading.lowBattery);
+    TEST_ASSERT_EQUAL_STRING("none", result.reading.rawErr.c_str());
+    TEST_ASSERT_FALSE(result.reading.swVersion.has_value());
+}
+
+static void test_binary_flags_null_readings_and_sw_decode(void) {
+    ParseResult result = parseSensorPacket(fromHex(kVectorDhtFailLowBatSw));
+
+    TEST_ASSERT_TRUE(result.ok());
+    TEST_ASSERT_EQUAL_STRING("ToolroomTemp", result.reading.id.c_str());
+    TEST_ASSERT_FALSE(result.reading.temperatureC.has_value());
+    TEST_ASSERT_FALSE(result.reading.humidityPct.has_value());
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 3.25f, *result.reading.batteryVoltage);
+    TEST_ASSERT_TRUE(result.reading.lowBattery);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(SensorError::Dht), static_cast<int>(result.reading.err));
+    TEST_ASSERT_EQUAL_STRING("dht", result.reading.rawErr.c_str());
+    TEST_ASSERT_TRUE(result.reading.swVersion.has_value());
+    TEST_ASSERT_EQUAL_STRING("49a521c", result.reading.swVersion->c_str());
+    TEST_ASSERT_EQUAL_UINT32(1, result.reading.bootCount);
+}
+
+static void test_binary_negative_temperature_and_24bit_counters(void) {
+    // id "n", t -12.5 (0xFF83), h 0.0, v 2.00, boot 0xABCDEF, seq 0xFFFFFF.
+    ParseResult result = parseSensorPacket(fromHex("C1 00 01 6E EFCDAB FFFFFF 83FF 0000 00"));
+
+    TEST_ASSERT_TRUE(result.ok());
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, -12.5f, *result.reading.temperatureC);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, *result.reading.humidityPct);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 2.0f, *result.reading.batteryVoltage);
+    TEST_ASSERT_EQUAL_UINT32(0xABCDEF, result.reading.bootCount);
+    TEST_ASSERT_EQUAL_UINT32(0xFFFFFF, result.reading.seq);
+}
+
+// The point of the migration: Home Assistant must not be able to tell
+// which format a node used.
+static void test_binary_and_json_produce_identical_state_message(void) {
+    ParseResult bin = parseSensorPacket(fromHex(kVectorHealthy));
+    ParseResult json = parseSensorPacket(std::string(
+        R"({"id":"GarageTemp","t":21.5,"h":55.2,"v":3.90,"boot":7,"seq":4,"lb":0,"err":"none"})"));
+    TEST_ASSERT_TRUE(bin.ok());
+    TEST_ASSERT_TRUE(json.ok());
+
+    MqttMessage a = buildSensorStateMessage(bin.reading, -80, "lora/incoming/garagetemp");
+    MqttMessage b = buildSensorStateMessage(json.reading, -80, "lora/incoming/garagetemp");
+    TEST_ASSERT_EQUAL_STRING(b.payload.c_str(), a.payload.c_str());
+}
+
+static void test_binary_dht_failure_state_message_matches_json(void) {
+    ParseResult bin = parseSensorPacket(fromHex(kVectorDhtFailLowBatSw));
+    ParseResult json = parseSensorPacket(std::string(
+        R"({"id":"ToolroomTemp","t":null,"h":null,"v":3.25,"boot":1,"seq":1,"lb":1,"err":"dht","sw":"49a521c"})"));
+    TEST_ASSERT_TRUE(bin.ok());
+    TEST_ASSERT_TRUE(json.ok());
+
+    MqttMessage a = buildSensorStateMessage(bin.reading, -80, "t");
+    MqttMessage b = buildSensorStateMessage(json.reading, -80, "t");
+    TEST_ASSERT_EQUAL_STRING(b.payload.c_str(), a.payload.c_str());
+}
+
+static void test_binary_frame_id_is_sanitized_like_json(void) {
+    // id "a/b#" must not reach an MQTT topic unsanitized.
+    ParseResult result = parseSensorPacket(fromHex("C1 00 04 612F6223 010000 010000 0000 0000 00"));
+    TEST_ASSERT_TRUE(result.ok());
+    TEST_ASSERT_EQUAL_STRING(sanitizeMqttTopicSegment("a/b#").c_str(), result.reading.id.c_str());
+}
+
+static void test_binary_truncated_frames_rejected(void) {
+    std::string full = fromHex(kVectorHealthy);
+    for (size_t len = 1; len < full.size(); ++len) {
+        ParseResult result = parseSensorPacket(full.substr(0, len));
+        TEST_ASSERT_EQUAL_INT(static_cast<int>(ParseError::BadFrame), static_cast<int>(result.error));
+    }
+}
+
+static void test_binary_trailing_bytes_rejected(void) {
+    ParseResult result = parseSensorPacket(fromHex(kVectorHealthy) + std::string(1, '\0'));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ParseError::BadFrame), static_cast<int>(result.error));
+}
+
+static void test_binary_sw_flag_without_sw_bytes_rejected(void) {
+    // Healthy vector with the sw flag set but no sw field.
+    std::string frame = fromHex(kVectorHealthy);
+    frame[1] = 0x04;
+    ParseResult result = parseSensorPacket(frame);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ParseError::BadFrame), static_cast<int>(result.error));
+}
+
+static void test_binary_empty_sw_rejected(void) {
+    std::string frame = fromHex(kVectorHealthy);
+    frame[1] = 0x04;
+    frame.push_back('\0');  // sw length 0
+    ParseResult result = parseSensorPacket(frame);
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ParseError::BadFrame), static_cast<int>(result.error));
+}
+
+static void test_binary_zero_length_id_rejected(void) {
+    ParseResult result = parseSensorPacket(fromHex("C1 00 00 010000 010000 0000 0000 00"));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ParseError::EmptyId), static_cast<int>(result.error));
+}
+
+static void test_binary_unknown_flag_bits_ignored(void) {
+    // Bits 3-7 are reserved: a newer node may set them, and this gateway
+    // must still publish the fields it understands.
+    std::string frame = fromHex(kVectorHealthy);
+    frame[1] = static_cast<char>(0xF8);
+    ParseResult result = parseSensorPacket(frame);
+    TEST_ASSERT_TRUE(result.ok());
+    TEST_ASSERT_FALSE(result.reading.lowBattery);
+}
+
+static void test_packet_with_other_first_byte_still_parsed_as_json(void) {
+    ParseResult result = parseSensorPacket(std::string("not json"));
+    TEST_ASSERT_EQUAL_INT(static_cast<int>(ParseError::InvalidJson), static_cast<int>(result.error));
+}
+
 int main(int argc, char** argv) {
     UNITY_BEGIN();
+
+    RUN_TEST(test_binary_healthy_frame_decodes);
+    RUN_TEST(test_binary_flags_null_readings_and_sw_decode);
+    RUN_TEST(test_binary_negative_temperature_and_24bit_counters);
+    RUN_TEST(test_binary_and_json_produce_identical_state_message);
+    RUN_TEST(test_binary_dht_failure_state_message_matches_json);
+    RUN_TEST(test_binary_frame_id_is_sanitized_like_json);
+    RUN_TEST(test_binary_truncated_frames_rejected);
+    RUN_TEST(test_binary_trailing_bytes_rejected);
+    RUN_TEST(test_binary_sw_flag_without_sw_bytes_rejected);
+    RUN_TEST(test_binary_empty_sw_rejected);
+    RUN_TEST(test_binary_zero_length_id_rejected);
+    RUN_TEST(test_binary_unknown_flag_bits_ignored);
+    RUN_TEST(test_packet_with_other_first_byte_still_parsed_as_json);
 
     RUN_TEST(test_parse_success_payload);
     RUN_TEST(test_parse_dht_failure_payload_keeps_t_and_h_null);

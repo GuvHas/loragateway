@@ -72,6 +72,35 @@ manual check for the owner.
 - A field with the wrong type rejects the whole payload. Unknown fields are
   ignored.
 
+### Binary frame v1
+
+Nodes may send a compact binary frame instead of JSON (24 bytes instead of
+~83 for a typical reading, about 206 ms instead of 472 ms on air at SF9).
+`parseSensorPacket()` picks the format from the first byte: `0xC1` is a
+binary frame, anything else goes to the JSON parser. Both decode into the
+same `SensorReading`, so MQTT and Home Assistant see no difference. Both
+formats stay accepted, because nodes are reflashed one at a time.
+
+Little-endian. N is the id length.
+
+| Offset | Size | Field | Encoding |
+| --- | --- | --- | --- |
+| 0 | 1 | Magic and version | `0xC1` |
+| 1 | 1 | Flags | bit 0 `lb`, bit 1 sensor error (`err` `"dht"`), bit 2 `sw` present; bits 3 to 7 reserved, ignored |
+| 2 | 1 | N | id length, at least 1 |
+| 3 | N | `id` | ASCII, sanitized like the JSON id |
+| 3+N | 3 | `boot` | uint24 |
+| 6+N | 3 | `seq` | uint24 |
+| 9+N | 2 | `t` | int16, 0.1 °C; `0x8000` is null |
+| 11+N | 2 | `h` | uint16, 0.1 %; `0xFFFF` is null |
+| 13+N | 1 | `v` | uint8, (mV − 2000) / 10 |
+| 14+N | 1+M | `sw` | only with flag bit 2: length M (at least 1), then ASCII |
+
+The length must match the header exactly, or the frame is rejected
+(`ParseError::BadFrame`) and published on `<base>` as lowercase hex. The hex
+vectors in `test/test_parser/test_parser.cpp` are the golden vectors that
+loratemp's encoder must reproduce byte for byte; change them together.
+
 Nodes have no WiFi and no OTA, so a node in the field runs old firmware until
 someone reflashes it by hand. Contract changes must keep old nodes working, and
 the gateway change ships first.
@@ -85,7 +114,7 @@ Radio settings must match on both sides: 868 MHz, spreading factor 9, CRC on.
 | Topic | Retained | Content |
 | --- | --- | --- |
 | `<base>/<node id, lowercased>` | yes | Node reading plus `rssi` |
-| `<base>` | no | Raw bytes of a packet that failed to parse |
+| `<base>` | no | Raw bytes of a JSON packet that failed to parse, or lowercase hex of a bad binary frame |
 | `<base>/gateway/status` | yes | `online` or `offline` (last will). Availability topic for every entity. |
 | `<base>/gateway/state` | yes | Gateway diagnostics JSON |
 | `<base>/gateway/command/restart` | no | `PRESS` restarts the gateway |
