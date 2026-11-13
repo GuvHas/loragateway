@@ -16,10 +16,14 @@ CI runs both on every push and pull request. Run both before pushing.
 Send `pio run` output to a log file and read the end of it. Piping it into
 `head` closes the pipe early and the build hangs.
 
-The ESP32 platform is pinned to 7.1.3 (Arduino core 2.0.17) in
-`platformio.ini`. Unpinned, CI picked up platform 8.0.0 (Arduino core 3.x) and
-the build broke on the watchdog API. Upgrading is its own change: port
-`esp_task_wdt_init()` in `main.cpp` and have the owner test on the board.
+The ESP32 platform is pinned to 8.0.0 (Arduino core 3.x, ESP-IDF 5) in
+`platformio.ini`; before that it was 7.1.3 (Arduino core 2.0.17). Core 3.x
+changed the task watchdog API and starts the watchdog before `setup()`, so
+`setupWatchdog()` in `main.cpp` reconfigures it rather than initialising it.
+Core 3.x also outgrew the default 1.25 MB app partition, so the firmware uses
+`min_spiffs.csv` (two 1.9 MB OTA slots, NVS unchanged, no filesystem in use).
+A partition table change has to be flashed over USB.
+A platform bump is its own change, and the owner tests it on the board.
 `WiFiManager` is still taken from the head of its git repository.
 
 ## Layout

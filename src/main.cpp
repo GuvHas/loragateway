@@ -8,6 +8,7 @@
 #include <Preferences.h>
 #include <string>
 #include <ArduinoOTA.h>
+#include <esp_arduino_version.h>
 #include <esp_task_wdt.h>
 
 #include "hal_esp32.h"
@@ -376,14 +377,37 @@ void sendGatewayDiscovery() {
   }
 }
 
+// Task watchdog: panic (and so reboot) if loop() stops calling
+// esp_task_wdt_reset() for WDT_TIMEOUT_S.
+//
+// Arduino core 3.x (platform 8.x, ESP-IDF 5) takes a config struct, and the
+// core has already started the watchdog with a 5 s default by the time setup()
+// runs, so esp_task_wdt_init() would fail with ESP_ERR_INVALID_STATE. Reconfigure
+// it instead, and init only if it is not running. Core 0's idle task stays
+// watched, as it was under core 2.x's sdkconfig.
+void setupWatchdog() {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  esp_task_wdt_config_t wdtConfig = {
+    .timeout_ms = WDT_TIMEOUT_S * 1000,
+    .idle_core_mask = (1 << 0),
+    .trigger_panic = true,
+  };
+  if (esp_task_wdt_reconfigure(&wdtConfig) == ESP_ERR_INVALID_STATE) {
+    esp_task_wdt_init(&wdtConfig);
+  }
+#else
+  esp_task_wdt_init(WDT_TIMEOUT_S, true);
+#endif
+  esp_task_wdt_add(NULL);
+}
+
 // ==========================================
 //                 SETUP
 // ==========================================
 void setup() {
   Serial.begin(115200);
 
-  esp_task_wdt_init(WDT_TIMEOUT_S, true);
-  esp_task_wdt_add(NULL);
+  setupWatchdog();
 
   setup_display();
   present_logo();
