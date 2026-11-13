@@ -19,12 +19,18 @@ public:
         connected_ = reconnectShouldSucceed;
     }
 
+    void hardReset() override {
+        hardResetAttempts++;
+        connected_ = reconnectShouldSucceed;
+    }
+
     // Test controls
     bool connected_ = false;
     bool reconnectShouldSucceed = true;
 
     // Test observations
     int reconnectAttempts = 0;
+    int hardResetAttempts = 0;
 };
 
 class FakeLoRa : public gateway::ILoRaReceiver {
@@ -60,7 +66,10 @@ public:
         return connected_;
     }
 
-    void disconnect() override { connected_ = false; }
+    void disconnect() override {
+        disconnectCalls++;
+        connected_ = false;
+    }
 
     bool publish(const std::string& topic, const std::string& payload, bool retain) override {
         if (!connected_ || !publishShouldSucceed) return false;
@@ -94,9 +103,19 @@ public:
 
     // Test observations
     int connectAttempts = 0;
+    int disconnectCalls = 0;
     int loopCalls = 0;
     std::vector<PublishedMessage> published;
     std::vector<std::string> subscribeCalls;
+
+    // Test helper: how many subscribe() calls named exactly `topic`.
+    size_t subscribeCallsFor(const std::string& topic) const {
+        size_t n = 0;
+        for (const auto& t : subscribeCalls) {
+            if (t == topic) n++;
+        }
+        return n;
+    }
 
 private:
     std::map<std::string, gateway::IMqttClient::MessageCallback> subscriptions_;

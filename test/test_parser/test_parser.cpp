@@ -532,11 +532,13 @@ static void test_build_gateway_status_message(void) {
     stats.onlyKnownNodes = true;
     stats.queueDepth = 3;
     stats.packetsDropped = 2;
+    stats.wifiReconnects = 5;
+    stats.wifiDisconnectReason = 200;
 
     MqttMessage msg = buildGatewayStatusMessage(gateway, stats);
     TEST_ASSERT_EQUAL_STRING("lora/incoming/gateway/state", msg.topic.c_str());
 
-    StaticJsonDocument<512> doc;
+    StaticJsonDocument<1024> doc;
     DeserializationError err = deserializeJson(doc, msg.payload);
     TEST_ASSERT_FALSE(err);
     TEST_ASSERT_EQUAL_UINT32(42, doc["uptime_s"].as<uint32_t>());
@@ -544,6 +546,10 @@ static void test_build_gateway_status_message(void) {
     TEST_ASSERT_TRUE(doc["onlyknown"].as<bool>());
     TEST_ASSERT_EQUAL_UINT32(3, doc["queue_depth"].as<uint32_t>());
     TEST_ASSERT_EQUAL_UINT32(2, doc["packets_dropped"].as<uint32_t>());
+    // WiFi recovery diagnostics: how often the gateway had to reconnect, and
+    // the ESP-IDF reason code of the last disconnect (200 = beacon timeout).
+    TEST_ASSERT_EQUAL_UINT32(5, doc["wifi_reconnects"].as<uint32_t>());
+    TEST_ASSERT_EQUAL_INT(200, doc["wifi_disc_reason"].as<int>());
 }
 
 int main(int argc, char** argv) {

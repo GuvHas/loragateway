@@ -19,6 +19,8 @@ std::string toLowerAscii(const std::string& s) {
     return out;
 }
 
+const char* const kHomeAssistantStatusTopic = "homeassistant/status";
+
 std::string formatOneDecimal(float value) {
     char buf[16];
     snprintf(buf, sizeof(buf), "%.1f", static_cast<double>(value));
@@ -164,8 +166,29 @@ GatewayIdentity GatewayOrchestrator::identity() const {
     return GatewayIdentity{deviceName_, baseTopic_};
 }
 
+void GatewayOrchestrator::setWifiRecoveryEnabled(bool enabled) {
+    if (enabled == wifiRecoveryEnabled_) return;
+    wifiRecoveryEnabled_ = enabled;
+    // Either way, the next outage tick starts a fresh outage: no restart
+    // for time spent with the portal open, and an immediate first attempt
+    // once it closes.
+    wifiOutageActive_ = false;
+}
+
+bool GatewayOrchestrator::takeHomeAssistantRestart() {
+    bool restarted = homeAssistantRestarted_;
+    homeAssistantRestarted_ = false;
+    return restarted;
+}
+
+void GatewayOrchestrator::requestRestart(const std::string& reason) {
+    restartRequested_ = true;
+    restartReason_ = reason;
+}
+
 void GatewayOrchestrator::tick() {
     if (wifi_.connected()) {
+        wifiOutageActive_ = false;
         if (mqtt_.connected()) {
             mqtt_.loop();
             // Retried every tick until it succeeds, not just once right
@@ -174,30 +197,76 @@ void GatewayOrchestrator::tick() {
             // connection down, in which case connected() stays true but
             // commands would otherwise go unheard until some later,
             // unrelated disconnect/reconnect forced a retry.
-            if (!commandsSubscribed_) {
-                commandsSubscribed_ = subscribeToCommands();
+            if (!commandsSubscribed_ || !haStatusSubscribed_) {
+                subscribeToCommands();
             }
             flushQueue();
         } else {
             commandsSubscribed_ = false;
+            haStatusSubscribed_ = false;
             attemptMqttReconnect();
         }
     } else {
-        attemptWifiReconnect();
+        handleWifiDown();
     }
     ingestLoRaPacket();
 }
 
+void GatewayOrchestrator::handleWifiDown() {
+    // PubSubClient doesn't notice that WiFi went away: its socket stays
+    // "connected" and every write into it can block for ~10 s once the TCP
+    // send buffer fills, enough to trip the task watchdog during an AP
+    // reboot. Close the stale session now; it reconnects normally once WiFi
+    // is back instead of waiting for a keepalive timeout.
+    if (mqtt_.connected()) {
+        mqtt_.disconnect();
+    }
+    commandsSubscribed_ = false;
+    haStatusSubscribed_ = false;
+
+    if (!wifiRecoveryEnabled_) return;
+
+    unsigned long now = clock_.millis();
+    if (!wifiOutageActive_) {
+        wifiOutageActive_ = true;
+        wifiOutageStartMs_ = now;
+        wifiAttemptsThisOutage_ = 0;
+        hasAttemptedWifiReconnect_ = false;
+        currentWifiBackoffMs_ = wifiReconnectBackoffMs_;
+    }
+
+    if (!restartRequested_ && (now - wifiOutageStartMs_) >= kWifiOfflineRestartMs) {
+        requestRestart("WiFi offline 10 min");
+        return;
+    }
+
+    attemptWifiReconnect();
+}
+
 void GatewayOrchestrator::attemptWifiReconnect() {
     unsigned long now = clock_.millis();
-    if (hasAttemptedWifiReconnect_ && (now - lastWifiReconnectAttemptMs_) < wifiReconnectBackoffMs_) {
+    if (hasAttemptedWifiReconnect_ && (now - lastWifiReconnectAttemptMs_) < currentWifiBackoffMs_) {
         return;
+    }
+    if (hasAttemptedWifiReconnect_) {
+        // Double the gap after each failed attempt in this outage, capped.
+        currentWifiBackoffMs_ = currentWifiBackoffMs_ >= kMaxWifiReconnectBackoffMs / 2
+                                    ? kMaxWifiReconnectBackoffMs
+                                    : currentWifiBackoffMs_ * 2;
     }
     hasAttemptedWifiReconnect_ = true;
     lastWifiReconnectAttemptMs_ = now;
+    wifiAttemptsThisOutage_++;
+    wifiReconnectAttemptsTotal_++;
 
-    display_.showLines({"WiFi Reconnecting..."});
-    wifi_.reconnect(); // non-blocking; connected() reflects the outcome on a later tick()
+    // non-blocking either way; connected() reflects the outcome on a later tick()
+    if (wifiAttemptsThisOutage_ % kWifiHardResetEveryNAttempts == 0) {
+        display_.showLines({"WiFi Reconnecting...", "(radio reset)"});
+        wifi_.hardReset();
+    } else {
+        display_.showLines({"WiFi Reconnecting..."});
+        wifi_.reconnect();
+    }
 }
 
 void GatewayOrchestrator::attemptMqttReconnect() {
@@ -213,30 +282,46 @@ void GatewayOrchestrator::attemptMqttReconnect() {
         display_.showLines({"MQTT Connected!"});
         // Also retried every tick while connected (see tick()) in case this
         // particular attempt fails without the connection itself dropping.
-        commandsSubscribed_ = subscribeToCommands();
+        subscribeToCommands();
         flushQueue();
     }
 }
 
 bool GatewayOrchestrator::subscribeToCommands() {
-    return mqtt_.subscribe(
-        gatewayCommandTopic(baseTopic_, "restart"), [this](const std::string& topic, const std::string& payload) {
-            if (payload != kRestartCommandPayload) return;
-            // Clear any retained message on this topic before acting on it:
-            // without this, a stale retained "PRESS" -- left by a manual
-            // `mosquitto_pub -r`, a misconfigured automation, or even a
-            // button whose own retain setting gets changed -- would be
-            // redelivered by the broker on every future subscribe (i.e.
-            // every MQTT reconnect), causing an infinite reboot loop that
-            // only clearing the broker's retained message by hand could
-            // break.
-            mqtt_.publish(topic, "", true);
-            restartRequested_ = true;
-        });
+    if (!commandsSubscribed_) {
+        commandsSubscribed_ = mqtt_.subscribe(
+            gatewayCommandTopic(baseTopic_, "restart"), [this](const std::string& topic, const std::string& payload) {
+                if (payload != kRestartCommandPayload) return;
+                // Clear any retained message on this topic before acting on it:
+                // without this, a stale retained "PRESS" -- left by a manual
+                // `mosquitto_pub -r`, a misconfigured automation, or even a
+                // button whose own retain setting gets changed -- would be
+                // redelivered by the broker on every future subscribe (i.e.
+                // every MQTT reconnect), causing an infinite reboot loop that
+                // only clearing the broker's retained message by hand could
+                // break.
+                mqtt_.publish(topic, "", true);
+                requestRestart("MQTT command");
+            });
+    }
+    if (!haStatusSubscribed_) {
+        // Home Assistant's birth message: "online" when it (re)starts. If the
+        // broker lost its retained discovery configs meanwhile, HA would
+        // otherwise never see this gateway's entities again until the
+        // gateway itself rebooted. Node discovery is rebuilt on each node's
+        // next packet; main.cpp resends the gateway's own discovery.
+        haStatusSubscribed_ = mqtt_.subscribe(
+            kHomeAssistantStatusTopic, [this](const std::string&, const std::string& payload) {
+                if (payload != "online") return;
+                clearDiscoveredNodes();
+                homeAssistantRestarted_ = true;
+            });
+    }
+    return commandsSubscribed_ && haStatusSubscribed_;
 }
 
 void GatewayOrchestrator::flushQueue() {
-    while (!outboundQueue_.empty()) {
+    while (!outboundQueue_.empty() && online()) {
         const QueuedMessage front = outboundQueue_.front();
         if (!mqtt_.publish(front.topic, front.payload, front.retain)) {
             break; // leave the rest queued, retry next tick
@@ -248,7 +333,8 @@ void GatewayOrchestrator::flushQueue() {
 
 void GatewayOrchestrator::enqueueOrPublish(const MqttMessage& msg, bool retain,
                                             const std::string& discoveryNodeId) {
-    if (mqtt_.connected() && mqtt_.publish(msg.topic, msg.payload, retain)) {
+    // online(), not mqtt_.connected(): see online()'s comment.
+    if (online() && mqtt_.publish(msg.topic, msg.payload, retain)) {
         onMessagePublished(discoveryNodeId);
         return;
     }

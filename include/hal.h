@@ -26,6 +26,13 @@ public:
     // Requests a reconnect attempt. Does not block waiting for the result;
     // connected() reflects success (or continued failure) on a later call.
     virtual void reconnect() = 0;
+
+    // Stronger, still non-blocking recovery for when reconnect() keeps
+    // failing: drops whatever the driver is doing, makes sure the station
+    // interface is enabled (WiFiManager turns it off when its setup portal
+    // starts without a connection) and starts a fresh connect with the saved
+    // credentials.
+    virtual void hardReset() = 0;
 };
 
 class ILoRaReceiver {

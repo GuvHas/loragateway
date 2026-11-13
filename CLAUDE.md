@@ -89,6 +89,7 @@ Radio settings must match on both sides: 868 MHz, spreading factor 9, CRC on.
 | `<base>/gateway/status` | yes | `online` or `offline` (last will). Availability topic for every entity. |
 | `<base>/gateway/state` | yes | Gateway diagnostics JSON |
 | `<base>/gateway/command/restart` | no | `PRESS` restarts the gateway |
+| `homeassistant/status` | (subscribed) | `online` from Home Assistant resends all discovery |
 | `homeassistant/<component>/lora_<slug>_<suffix>/config` | yes | Node discovery, 8 entities per node |
 | `homeassistant/<component>/<gateway slug>_<suffix>/config` | yes | Gateway discovery |
 
@@ -130,6 +131,19 @@ Radio settings must match on both sides: 868 MHz, spreading factor 9, CRC on.
 - **The restart handler clears the retained command first.** A retained
   `PRESS` would otherwise restart the gateway on every reconnect.
 - **Preferences key names are limited to 15 characters.**
+- **Publish only when `online()`, never on `mqtt.connected()` alone.**
+  PubSubClient keeps reporting connected over a dead socket after WiFi drops,
+  and each write into it can block for 10 s, enough to trip the 30 s watchdog
+  during an AP reboot. The orchestrator closes that session when WiFi drops.
+- **The setup portal must time out.** WiFiManager switches the WiFi station
+  off when its portal starts without a connection, and `WiFi.reconnect()`
+  cannot switch it back on. With no timeout, a gateway that booted during a
+  network outage could stay offline until power-cycled. While the portal is open
+  WiFi recovery is paused; after it closes, recovery backs off from 10 s to
+  60 s, makes every third attempt `IWifiRadio::hardReset()`, and requests a
+  restart after 10 minutes offline.
+- **Boot-time WiFi connect must finish inside the watchdog.** WiFiManager's
+  default connect timeout falls back to 60 s; it is set to 15 s.
 
 ## When a node does not show up in Home Assistant
 
