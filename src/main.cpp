@@ -547,9 +547,10 @@ void setup() {
 
   if (wm.getConfigPortalActive()) {
     registerWebRoutes(); // on the setup portal's server
-  } else {
-    ensureNetworkServices();
   }
+  // Web pages and OTA start from loop() via ensureNetworkServices(), after
+  // ArduinoOTA.setHostname() below: ArduinoOTA.begin() fixes the mDNS
+  // hostname, and a later setHostname() is ignored.
 
   client.setServer(mqtt_server, atoi(mqtt_port));
   client.setBufferSize(MQTT_BUFFER_SIZE);
