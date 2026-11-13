@@ -409,12 +409,13 @@ void GatewayOrchestrator::ingestLoRaPacket() {
 void GatewayOrchestrator::ingestOnePacket(const RawPacket& packet) {
     packetsReceived_++;
 
-    ParseResult parsed = parseSensorPayload(packet.data);
+    ParseResult parsed = parseSensorPacket(packet.data);
     if (!parsed.ok()) {
-        // Malformed/truncated JSON, or a payload that failed strict field
-        // validation: forward the raw bytes to the base topic rather than
+        // Malformed/truncated JSON or binary frame, or a payload that failed
+        // strict field validation: forward it to the base topic rather than
         // dropping the packet or crashing (still subject to store-and-forward).
-        enqueueOrPublish(MqttMessage{baseTopic_, packet.data}, false);
+        // A binary frame goes out as hex text; see unparsedPacketPayload().
+        enqueueOrPublish(MqttMessage{baseTopic_, unparsedPacketPayload(packet.data)}, false);
         return;
     }
 
