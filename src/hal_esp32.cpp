@@ -2,6 +2,9 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
+
+#include <cstring>
 
 namespace gateway {
 
@@ -15,6 +18,28 @@ bool Esp32WifiRadio::connected() {
 
 void Esp32WifiRadio::reconnect() {
     WiFi.reconnect();
+}
+
+void Esp32WifiRadio::hardReset() {
+    // WiFi.reconnect() above only calls esp_wifi_connect(). That does nothing
+    // when WiFiManager's setup portal switched the station off, and fails
+    // with "sta is connecting" when the driver is stuck mid-attempt. So:
+    // switch the station back on, cancel whatever it is doing, and start
+    // over from the credentials the driver already holds. begin(ssid, pass)
+    // rather than begin() so the scan and sort method set in setup() apply.
+    WiFi.enableSTA(true);
+    WiFi.disconnect();
+
+    wifi_config_t conf;
+    if (esp_wifi_get_config(WIFI_IF_STA, &conf) == ESP_OK && conf.sta.ssid[0] != 0) {
+        char ssid[sizeof(conf.sta.ssid) + 1] = {0};
+        char pass[sizeof(conf.sta.password) + 1] = {0};
+        memcpy(ssid, conf.sta.ssid, sizeof(conf.sta.ssid));
+        memcpy(pass, conf.sta.password, sizeof(conf.sta.password));
+        WiFi.begin(ssid, pass);
+    } else {
+        WiFi.begin();
+    }
 }
 
 // ---------------------------------------------------------------------

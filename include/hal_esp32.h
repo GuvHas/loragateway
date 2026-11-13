@@ -26,6 +26,7 @@ class Esp32WifiRadio : public IWifiRadio {
 public:
     bool connected() override;
     void reconnect() override;
+    void hardReset() override;
 };
 
 // Wraps the global `LoRa` singleton (sandeepmistry/LoRa), receiving packets

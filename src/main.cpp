@@ -38,6 +38,15 @@
 #define WAKE_ON_PACKET_MS      5000
 #define STATUS_PUBLISH_MS      60000
 #define WDT_TIMEOUT_S          30
+// WiFiManager's boot-time connect. Must stay well under WDT_TIMEOUT_S: its
+// default (0) falls back to WiFi.waitForConnectResult()'s 60 s, so a boot
+// while the AP was up but DHCP wasn't answering tripped the watchdog.
+#define WIFI_CONNECT_TIMEOUT_S 15
+// How long the setup portal stays open after a boot without WiFi before
+// handing the radio back to the reconnect loop. It stays open while a phone
+// is connected to it. Without a timeout the portal (which switches the WiFi
+// station off) stayed up forever and the gateway never rejoined the network.
+#define CONFIG_PORTAL_TIMEOUT_S 300
 
 // ==========================================
 //              BUFFER SIZES
@@ -134,6 +143,13 @@ unsigned long lastStatusPublish = 0;
 // orchestrator.setIdentity() and clearDiscoveredNodes() already refresh the
 // per-node discovery bookkeeping for exactly the same kind of change.
 bool gatewayDiscoverySent = false;
+
+// ESP-IDF reason code of the last station disconnect, written from the WiFi
+// event task and published in <base>/gateway/state as wifi_disc_reason.
+volatile int lastWifiDisconnectReason = 0;
+// ArduinoOTA (and its mDNS) is started on the first WiFi connection rather
+// than in setup(), so OTA by hostname also works after a boot without WiFi.
+bool otaStarted = false;
 
 // Forward declaration: Esp32Display (below) invokes this on every display
 // update so the existing screen-timeout bookkeeping keeps working without
@@ -307,6 +323,31 @@ void handleClearDiscovered() {
   wm.server->send(302, "text/plain", "Redirecting...");
 }
 
+// WiFiManager creates a new web server each time a portal starts, so the
+// device management routes must be registered again every time.
+void registerWebRoutes() {
+  if (!wm.server) return;
+  wm.server->on("/devices", handleDevicesPage);
+  wm.server->on("/approve", handleApprove);
+  wm.server->on("/remove",  handleRemove);
+  wm.server->on("/clear-discovered", handleClearDiscovered);
+}
+
+// Brings up what needs a network once WiFi is connected: the settings and
+// /devices web pages (again, if the setup portal timed out and took its
+// server down) and OTA.
+void ensureNetworkServices() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  if (!wm.getConfigPortalActive() && !wm.getWebPortalActive()) {
+    wm.startWebPortal();
+    registerWebRoutes();
+  }
+  if (!otaStarted) {
+    ArduinoOTA.begin();
+    otaStarted = true;
+  }
+}
+
 // ==========================================
 //           HELPER FUNCTIONS
 // ==========================================
@@ -352,7 +393,7 @@ void logForwardedPacket(const std::string& topic, const std::string& payload) {
 // diagnostic status, which isn't part of that per-packet flow.
 
 void publishGatewayStatus() {
-  if (!mqttAdapter.connected()) return;
+  if (!orchestrator.online()) return;
 
   gateway::GatewayStats stats;
   stats.uptimeSeconds = millis() / 1000;
@@ -363,6 +404,8 @@ void publishGatewayStatus() {
   stats.onlyKnownNodes = !orchestrator.allowList().entries().empty();
   stats.queueDepth = orchestrator.queuedMessageCount();
   stats.packetsDropped = orchestrator.droppedMessageCount();
+  stats.wifiReconnects = orchestrator.wifiReconnectAttempts();
+  stats.wifiDisconnectReason = lastWifiDisconnectReason;
 
   gateway::MqttMessage msg = gateway::buildGatewayStatusMessage(currentGatewayIdentity(), stats);
   mqttAdapter.publish(msg.topic, msg.payload, true);
@@ -435,6 +478,13 @@ void setup() {
   orchestrator.begin(); // loads the persisted allowlist via nodeStore
 
   WiFi.setHostname(device_name);
+  // With more than one AP on the SSID, join the strongest rather than the
+  // first one heard; the ESP32 does not roam afterwards.
+  WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+  WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+    lastWifiDisconnectReason = info.wifi_sta_disconnected.reason;
+  }, ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
 
   custom_mqtt_server.setValue(mqtt_server, FIELD_LEN);
   custom_mqtt_port.setValue(mqtt_port, PORT_LEN);
@@ -462,6 +512,9 @@ void setup() {
   loRaReceiver.begin();
 
   wm.setConfigPortalBlocking(false);
+  wm.setConnectTimeout(WIFI_CONNECT_TIMEOUT_S);
+  wm.setConfigPortalTimeout(CONFIG_PORTAL_TIMEOUT_S);
+  wm.setAPClientCheck(true);
   wm.setSaveConfigCallback(saveConfigCallback);
 
   // Add "Manage Devices" link to the main portal menu
@@ -481,19 +534,22 @@ void setup() {
   display.drawString(0, 15, "AP: LoRaGateway-Setup");
   display.display();
 
+  esp_task_wdt_reset(); // autoConnect can take up to WIFI_CONNECT_TIMEOUT_S
   if(wm.autoConnect("LoRaGateway-Setup")) {
       Serial.println("WiFi Connected!");
   } else {
       Serial.println("WiFi Portal Active");
   }
+  esp_task_wdt_reset();
 
-  wm.startWebPortal();
+  // Mains powered: modem sleep only adds missed beacons and latency.
+  WiFi.setSleep(false);
 
-  // Register custom device management routes on WiFiManager's web server
-  wm.server->on("/devices", handleDevicesPage);
-  wm.server->on("/approve", handleApprove);
-  wm.server->on("/remove",  handleRemove);
-  wm.server->on("/clear-discovered", handleClearDiscovered);
+  if (wm.getConfigPortalActive()) {
+    registerWebRoutes(); // on the setup portal's server
+  } else {
+    ensureNetworkServices();
+  }
 
   client.setServer(mqtt_server, atoi(mqtt_port));
   client.setBufferSize(MQTT_BUFFER_SIZE);
@@ -526,7 +582,7 @@ void setup() {
     display.display();
     Serial.printf("OTA Error[%u]\n", error);
   });
-  ArduinoOTA.begin();
+  // ArduinoOTA.begin() is in ensureNetworkServices(), once WiFi is up.
 
   display.clear();
   display.setFont(ArialMT_Plain_16);
@@ -544,7 +600,8 @@ void loop() {
   esp_task_wdt_reset();
 
   wm.process();
-  ArduinoOTA.handle();
+  ensureNetworkServices();
+  if (otaStarted) ArduinoOTA.handle();
 
   if (isScreenOn && (millis() - lastScreenUpdate > screenTimeout)) {
     display.displayOff();
@@ -600,11 +657,21 @@ void loop() {
   // decisions, sensor-state and discovery publishing, the store-and-forward
   // queue, and MQTT connect/backoff all live in the orchestrator
   // (include/orchestrator.h), unit-tested natively in test/test_orchestrator.
+  // The setup portal owns the radio while it is open (see
+  // CONFIG_PORTAL_TIMEOUT_S); WiFi recovery resumes once it closes.
+  orchestrator.setWifiRecoveryEnabled(!wm.getConfigPortalActive());
   orchestrator.tick();
 
-  // mqttAdapter.connected() alone is a sufficient gate here: MQTT can't be
-  // connected without WiFi also being up.
-  if (mqttAdapter.connected() && (millis() - lastStatusPublish > STATUS_PUBLISH_MS)) {
+  // Home Assistant restarted: resend the gateway's own discovery now rather
+  // than never (node discovery is already reset inside the orchestrator).
+  if (orchestrator.takeHomeAssistantRestart()) {
+    gatewayDiscoverySent = false;
+    lastStatusPublish = millis() - STATUS_PUBLISH_MS - 1;
+  }
+
+  // online(), not mqttAdapter.connected(): PubSubClient keeps reporting
+  // connected over a dead socket after WiFi drops.
+  if (orchestrator.online() && (millis() - lastStatusPublish > STATUS_PUBLISH_MS)) {
     lastStatusPublish = millis();
     if (!gatewayDiscoverySent) {
       sendGatewayDiscovery();
@@ -614,7 +681,8 @@ void loop() {
   }
 
   // Set by GatewayOrchestrator when a valid restart command arrives on the
-  // gateway's command topic (see gatewayCommandTopic() and the HA "Restart"
+  // gateway's command topic, or after WiFi has been down for
+  // kWifiOfflineRestartMs (see restartReason()) (see gatewayCommandTopic() and the HA "Restart"
   // button discovery in buildGatewayCommandDiscoveryMessages()). Actually
   // restarting the hardware is this file's job, not the orchestrator's,
   // since that's not something a hardware-free, natively-tested class
@@ -623,9 +691,9 @@ void loop() {
     display.displayOn();
     display.clear();
     display.drawString(0, 0, "Restart requested");
-    display.drawString(0, 15, "via MQTT command");
+    display.drawString(0, 15, orchestrator.restartReason().c_str());
     display.display();
-    Serial.println("Restarting (MQTT restart command)...");
+    Serial.printf("Restarting (%s)...\n", orchestrator.restartReason().c_str());
     delay(500); // let the OLED/Serial message actually be seen before rebooting
     ESP.restart();
   }

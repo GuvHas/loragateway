@@ -54,6 +54,17 @@ public:
     static constexpr unsigned long kDefaultMqttReconnectBackoffMs = 5000;
     static constexpr unsigned long kDefaultWifiReconnectBackoffMs = 10000;
 
+    // WiFi recovery escalation (see attemptWifiReconnect()). The backoff
+    // starts at wifiReconnectBackoffMs and doubles per failed attempt up to
+    // this cap, so a connect still waiting on DHCP from a router that is
+    // itself rebooting isn't torn down every 10 s.
+    static constexpr unsigned long kMaxWifiReconnectBackoffMs = 60000;
+    // Every Nth attempt in one outage is IWifiRadio::hardReset() rather than
+    // reconnect().
+    static constexpr int kWifiHardResetEveryNAttempts = 3;
+    // Last resort: request a reboot after WiFi has been down this long.
+    static constexpr unsigned long kWifiOfflineRestartMs = 10UL * 60UL * 1000UL;
+
     // Invoked with (topic, payload) whenever a LoRa packet is successfully
     // parsed and routed to an approved node, regardless of whether MQTT is
     // currently reachable. A plain function pointer, like IDisplay's
@@ -81,6 +92,24 @@ public:
     // so packets are captured — and queued — even while fully offline).
     void tick();
 
+    // True only when both WiFi and MQTT are up. PubSubClient keeps reporting
+    // connected() over a dead socket after WiFi drops, so the MQTT state
+    // alone is not enough to decide whether publishing is safe.
+    bool online() { return wifi_.connected() && mqtt_.connected(); }
+
+    // Pauses WiFi recovery (reconnects, resets and the offline restart)
+    // while WiFiManager's setup portal is open: the radio then belongs to
+    // the person configuring it. Re-enabling restarts the offline timer.
+    void setWifiRecoveryEnabled(bool enabled);
+
+    // WiFi reconnect attempts (plain and hard reset) since boot.
+    unsigned long wifiReconnectAttempts() const { return wifiReconnectAttemptsTotal_; }
+
+    // True once after Home Assistant announces it (re)started ("online" on
+    // homeassistant/status). Node discovery is already reset by then;
+    // main.cpp uses this to resend the gateway's own discovery.
+    bool takeHomeAssistantRestart();
+
     void setIdentity(const std::string& deviceName, const std::string& baseTopic);
     void clearDiscoveredNodes();
 
@@ -107,8 +136,13 @@ public:
     // hardware-free, natively-tested class should do itself.
     bool restartRequested() const { return restartRequested_; }
 
+    // Why restartRequested() is set, for the display and serial log.
+    const std::string& restartReason() const { return restartReason_; }
+
 private:
+    void handleWifiDown();
     void attemptWifiReconnect();
+    void requestRestart(const std::string& reason);
     void attemptMqttReconnect();
     bool subscribeToCommands();
     void flushQueue();
@@ -185,8 +219,20 @@ private:
 
     bool hasAttemptedWifiReconnect_ = false;
     unsigned long lastWifiReconnectAttemptMs_ = 0;
+    // Attempts in the current outage; drives the backoff and the hard reset.
+    int wifiAttemptsThisOutage_ = 0;
+    unsigned long currentWifiBackoffMs_ = 0;
+    // Set when an outage is first seen; cleared when WiFi returns.
+    bool wifiOutageActive_ = false;
+    unsigned long wifiOutageStartMs_ = 0;
+    bool wifiRecoveryEnabled_ = true;
+    unsigned long wifiReconnectAttemptsTotal_ = 0;
+
+    bool homeAssistantRestarted_ = false;
+    bool haStatusSubscribed_ = false;
 
     bool restartRequested_ = false;
+    std::string restartReason_;
     // Whether subscribeToCommands() has succeeded since the last connect();
     // reset to false on disconnect and retried every tick() while connected
     // until it succeeds (see tick()).

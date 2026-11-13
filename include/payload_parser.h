@@ -198,6 +198,12 @@ struct GatewayStats {
     // offline (see GatewayOrchestrator::kMaxQueuedMessages).
     uint32_t queueDepth = 0;
     unsigned long packetsDropped = 0;
+    // WiFi recovery diagnostics: reconnect attempts since boot (see
+    // GatewayOrchestrator::wifiReconnectAttempts()) and the ESP-IDF reason
+    // code of the most recent station disconnect (0 = none yet), so the
+    // cause of the next drop-out is visible in Home Assistant afterwards.
+    unsigned long wifiReconnects = 0;
+    int wifiDisconnectReason = 0;
 };
 
 // The gateway's own firmware version, embedded as "sw" in its HA discovery

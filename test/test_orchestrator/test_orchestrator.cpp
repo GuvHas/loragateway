@@ -1205,8 +1205,7 @@ static void test_connect_subscribes_to_restart_command_topic(void) {
     orchestrator.tick(); // connects, then must (re-)subscribe
 
     TEST_ASSERT_TRUE(mqtt.connected());
-    TEST_ASSERT_EQUAL_UINT32(1, mqtt.subscribeCalls.size());
-    TEST_ASSERT_EQUAL_STRING("lora/incoming/gateway/command/restart", mqtt.subscribeCalls[0].c_str());
+    TEST_ASSERT_EQUAL_UINT32(1, mqtt.subscribeCallsFor("lora/incoming/gateway/command/restart"));
 }
 
 static void test_restart_command_sets_restart_requested_flag(void) {
@@ -1267,7 +1266,7 @@ static void test_resubscribes_to_restart_topic_after_reconnect(void) {
     orchestrator.begin();
 
     orchestrator.tick(); // connect fails: no subscribe yet
-    TEST_ASSERT_EQUAL_UINT32(0, mqtt.subscribeCalls.size());
+    TEST_ASSERT_EQUAL_UINT32(0, mqtt.subscribeCallsFor("lora/incoming/gateway/command/restart"));
 
     // Broker comes back; backoff has elapsed by the default 5000ms.
     mqtt.connectShouldSucceed = true;
@@ -1276,7 +1275,7 @@ static void test_resubscribes_to_restart_topic_after_reconnect(void) {
 
     // MQTT subscriptions don't survive a disconnect/reconnect on a real
     // broker, so this must be redone on every successful connect().
-    TEST_ASSERT_EQUAL_UINT32(1, mqtt.subscribeCalls.size());
+    TEST_ASSERT_EQUAL_UINT32(1, mqtt.subscribeCallsFor("lora/incoming/gateway/command/restart"));
     mqtt.simulateIncomingMessage("lora/incoming/gateway/command/restart", "PRESS");
     TEST_ASSERT_TRUE(orchestrator.restartRequested());
 }
@@ -1332,21 +1331,388 @@ static void test_failed_subscribe_is_retried_on_a_later_tick(void) {
 
     orchestrator.tick(); // connects; the subscribe attempt fails
     TEST_ASSERT_TRUE(mqtt.connected());
-    TEST_ASSERT_EQUAL_UINT32(1, mqtt.subscribeCalls.size());
+    TEST_ASSERT_EQUAL_UINT32(1, mqtt.subscribeCallsFor("lora/incoming/gateway/command/restart"));
 
     orchestrator.tick(); // still connected: must retry the failed subscribe
-    TEST_ASSERT_EQUAL_UINT32(2, mqtt.subscribeCalls.size());
+    TEST_ASSERT_EQUAL_UINT32(2, mqtt.subscribeCallsFor("lora/incoming/gateway/command/restart"));
 
     mqtt.subscribeShouldSucceed = true;
     orchestrator.tick(); // this attempt succeeds
-    TEST_ASSERT_EQUAL_UINT32(3, mqtt.subscribeCalls.size());
+    TEST_ASSERT_EQUAL_UINT32(3, mqtt.subscribeCallsFor("lora/incoming/gateway/command/restart"));
 
     // Once subscribed, further ticks must not keep re-subscribing.
     orchestrator.tick();
-    TEST_ASSERT_EQUAL_UINT32(3, mqtt.subscribeCalls.size());
+    TEST_ASSERT_EQUAL_UINT32(3, mqtt.subscribeCallsFor("lora/incoming/gateway/command/restart"));
 
     mqtt.simulateIncomingMessage("lora/incoming/gateway/command/restart", "PRESS");
     TEST_ASSERT_TRUE(orchestrator.restartRequested());
+}
+
+// ---------------------------------------------------------------------
+// Recovering from network restarts (AP reboots, router updates). A field
+// report: after the network came back, the gateway sometimes never did.
+// ---------------------------------------------------------------------
+
+namespace {
+const unsigned long kTenMinutesMs = 10UL * 60UL * 1000UL;
+}
+
+// PubSubClient keeps reporting connected() after WiFi drops, because the
+// old TCP socket is never closed. Publishing into it blocks in
+// NetworkClient::write() (up to 10 s per call) and loses the message, so
+// while WiFi is down every message must go to the offline queue instead.
+static void test_messages_are_queued_while_wifi_down_even_if_mqtt_reports_connected(void) {
+    FakeWifiRadio wifi; // down
+    wifi.reconnectShouldSucceed = false;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true; // stale session from before the outage
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    loRa.push(kKitchenSuccessPayload);
+    orchestrator.tick();
+
+    TEST_ASSERT_EQUAL_UINT32(0, mqtt.published.size());
+    TEST_ASSERT_EQUAL_UINT32(9, orchestrator.queuedMessageCount());
+    TEST_ASSERT_FALSE(orchestrator.online());
+}
+
+static void test_stale_mqtt_session_is_closed_once_when_wifi_drops(void) {
+    FakeWifiRadio wifi;
+    wifi.reconnectShouldSucceed = false;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    mqtt.connected_ = true;
+    FakeStore store;
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_INT(1, mqtt.disconnectCalls);
+    TEST_ASSERT_FALSE(mqtt.connected());
+
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_INT(1, mqtt.disconnectCalls);
+}
+
+static void test_online_requires_both_wifi_and_mqtt(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    FakeStore store;
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    TEST_ASSERT_FALSE(orchestrator.online()); // WiFi only
+    mqtt.connected_ = true;
+    TEST_ASSERT_TRUE(orchestrator.online());
+    wifi.connected_ = false;
+    TEST_ASSERT_FALSE(orchestrator.online()); // stale MQTT only
+}
+
+// A fixed 10 s retry tears down a connection attempt that is still waiting
+// for DHCP from a router that is itself rebooting. Back off instead.
+static void test_wifi_reconnect_backoff_doubles_up_to_one_minute(void) {
+    FakeWifiRadio wifi;
+    wifi.reconnectShouldSucceed = false;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    FakeStore store;
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    // Expected gaps between attempts: 10 s, 20 s, 40 s, then capped at 60 s.
+    const unsigned long gaps[] = {10000, 20000, 40000, 60000, 60000};
+    orchestrator.tick(); // attempt 1 at t=0
+    int expected = 1;
+    for (unsigned long gap : gaps) {
+        clock.advance(gap - 1);
+        orchestrator.tick();
+        TEST_ASSERT_EQUAL_INT(expected, wifi.reconnectAttempts + wifi.hardResetAttempts);
+        clock.advance(1);
+        orchestrator.tick();
+        expected++;
+        TEST_ASSERT_EQUAL_INT(expected, wifi.reconnectAttempts + wifi.hardResetAttempts);
+    }
+}
+
+// WiFi.reconnect() only calls esp_wifi_connect(). It cannot bring back a
+// station that WiFiManager switched off, or unstick a driver that is
+// "already connecting", so every third attempt is a full reset instead.
+static void test_every_third_wifi_attempt_is_a_hard_reset(void) {
+    FakeWifiRadio wifi;
+    wifi.reconnectShouldSucceed = false;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    FakeStore store;
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    for (int i = 0; i < 6; ++i) {
+        orchestrator.tick();
+        clock.advance(60000); // always past the backoff
+    }
+
+    TEST_ASSERT_EQUAL_INT(4, wifi.reconnectAttempts);
+    TEST_ASSERT_EQUAL_INT(2, wifi.hardResetAttempts);
+}
+
+static void test_wifi_backoff_and_attempt_count_reset_after_reconnect(void) {
+    FakeWifiRadio wifi;
+    wifi.reconnectShouldSucceed = false;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    FakeStore store;
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    orchestrator.tick();       // attempt 1
+    clock.advance(10000);
+    orchestrator.tick();       // attempt 2, next gap would be 20 s
+    clock.advance(20000);
+    wifi.reconnectShouldSucceed = true;
+    orchestrator.tick();       // attempt 3 (a hard reset) succeeds
+    TEST_ASSERT_TRUE(wifi.connected());
+    orchestrator.tick();       // online for a tick
+
+    // A new outage starts from scratch: a plain reconnect right away, then 10 s.
+    wifi.connected_ = false;
+    wifi.reconnectShouldSucceed = false;
+    int reconnectsBefore = wifi.reconnectAttempts;
+    int hardResetsBefore = wifi.hardResetAttempts;
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_INT(reconnectsBefore + 1, wifi.reconnectAttempts);
+    clock.advance(10000);
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_INT(reconnectsBefore + 2, wifi.reconnectAttempts);
+    TEST_ASSERT_EQUAL_INT(hardResetsBefore, wifi.hardResetAttempts);
+}
+
+// Last resort: a reboot clears any WiFi driver state the steps above can't.
+static void test_restart_requested_after_ten_minutes_without_wifi(void) {
+    FakeWifiRadio wifi;
+    wifi.reconnectShouldSucceed = false;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    FakeStore store;
+    FakeDisplay display;
+    FakeClock clock;
+    clock.set(5000);
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    orchestrator.tick(); // outage noticed at t=5 s
+    clock.advance(kTenMinutesMs - 1);
+    orchestrator.tick();
+    TEST_ASSERT_FALSE(orchestrator.restartRequested());
+
+    clock.advance(1);
+    orchestrator.tick();
+    TEST_ASSERT_TRUE(orchestrator.restartRequested());
+    TEST_ASSERT_EQUAL_STRING("WiFi offline 10 min", orchestrator.restartReason().c_str());
+}
+
+static void test_offline_timer_resets_when_wifi_returns(void) {
+    FakeWifiRadio wifi;
+    wifi.reconnectShouldSucceed = false;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    FakeStore store;
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    orchestrator.tick();
+    clock.advance(kTenMinutesMs - 1000);
+    wifi.connected_ = true; // back just in time
+    orchestrator.tick();
+
+    wifi.connected_ = false; // drops again
+    orchestrator.tick();
+    clock.advance(kTenMinutesMs - 1);
+    orchestrator.tick();
+    TEST_ASSERT_FALSE(orchestrator.restartRequested());
+}
+
+// While WiFiManager's setup portal is open the radio is in AP mode for the
+// person configuring it. Reconnecting, resetting or rebooting would kick
+// them off, so recovery waits until the portal closes.
+static void test_wifi_recovery_paused_while_setup_portal_is_open(void) {
+    FakeWifiRadio wifi;
+    wifi.reconnectShouldSucceed = false;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    FakeStore store;
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+    orchestrator.setWifiRecoveryEnabled(false);
+
+    for (int i = 0; i < 30; ++i) {
+        orchestrator.tick();
+        clock.advance(60000);
+    }
+    TEST_ASSERT_EQUAL_INT(0, wifi.reconnectAttempts);
+    TEST_ASSERT_EQUAL_INT(0, wifi.hardResetAttempts);
+    TEST_ASSERT_FALSE(orchestrator.restartRequested());
+
+    // Portal closes: recovery resumes with a fresh offline timer.
+    orchestrator.setWifiRecoveryEnabled(true);
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_INT(1, wifi.reconnectAttempts);
+    clock.advance(kTenMinutesMs - 1);
+    orchestrator.tick();
+    TEST_ASSERT_FALSE(orchestrator.restartRequested());
+}
+
+static void test_wifi_reconnect_attempts_are_counted_for_diagnostics(void) {
+    FakeWifiRadio wifi;
+    wifi.reconnectShouldSucceed = false;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    FakeStore store;
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    for (int i = 0; i < 4; ++i) {
+        orchestrator.tick();
+        clock.advance(60000);
+    }
+    TEST_ASSERT_EQUAL_UINT32(4, orchestrator.wifiReconnectAttempts());
+}
+
+static void test_mqtt_restart_command_reason(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    FakeStore store;
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    orchestrator.tick();
+    mqtt.simulateIncomingMessage("lora/incoming/gateway/command/restart", "PRESS");
+    TEST_ASSERT_EQUAL_STRING("MQTT command", orchestrator.restartReason().c_str());
+}
+
+// ---------------------------------------------------------------------
+// Home Assistant restarts: HA publishes "online" on homeassistant/status
+// when it starts, and expects integrations to resend discovery.
+// ---------------------------------------------------------------------
+
+static void test_subscribes_to_home_assistant_status(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    FakeStore store;
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(1, mqtt.subscribeCallsFor("homeassistant/status"));
+}
+
+static void test_home_assistant_online_triggers_rediscovery(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    orchestrator.tick(); // connect + subscribe
+    loRa.push(kKitchenSuccessPayload);
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // 8 discovery + state
+    TEST_ASSERT_FALSE(orchestrator.takeHomeAssistantRestart());
+
+    mqtt.simulateIncomingMessage("homeassistant/status", "online");
+    TEST_ASSERT_TRUE(orchestrator.takeHomeAssistantRestart());
+    TEST_ASSERT_FALSE(orchestrator.takeHomeAssistantRestart()); // consumed
+
+    mqtt.published.clear();
+    loRa.push(kKitchenSuccessPayloadSeq11);
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(9, mqtt.published.size()); // discovery sent again
+}
+
+static void test_home_assistant_offline_is_ignored(void) {
+    FakeWifiRadio wifi;
+    wifi.connected_ = true;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    FakeStore store("kitchen");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator orchestrator(wifi, loRa, mqtt, store, display, clock,
+                                               "LoRaGateway", "lora/incoming");
+    orchestrator.begin();
+
+    orchestrator.tick();
+    loRa.push(kKitchenSuccessPayload);
+    orchestrator.tick();
+
+    mqtt.simulateIncomingMessage("homeassistant/status", "offline");
+    TEST_ASSERT_FALSE(orchestrator.takeHomeAssistantRestart());
+
+    mqtt.published.clear();
+    loRa.push(kKitchenSuccessPayloadSeq11);
+    orchestrator.tick();
+    TEST_ASSERT_EQUAL_UINT32(1, mqtt.published.size()); // state only
 }
 
 int main(int argc, char** argv) {
@@ -1397,6 +1763,22 @@ int main(int argc, char** argv) {
     RUN_TEST(test_resubscribes_to_restart_topic_after_reconnect);
     RUN_TEST(test_restart_command_clears_retained_message_to_prevent_reboot_loop);
     RUN_TEST(test_failed_subscribe_is_retried_on_a_later_tick);
+
+    RUN_TEST(test_messages_are_queued_while_wifi_down_even_if_mqtt_reports_connected);
+    RUN_TEST(test_stale_mqtt_session_is_closed_once_when_wifi_drops);
+    RUN_TEST(test_online_requires_both_wifi_and_mqtt);
+    RUN_TEST(test_wifi_reconnect_backoff_doubles_up_to_one_minute);
+    RUN_TEST(test_every_third_wifi_attempt_is_a_hard_reset);
+    RUN_TEST(test_wifi_backoff_and_attempt_count_reset_after_reconnect);
+    RUN_TEST(test_restart_requested_after_ten_minutes_without_wifi);
+    RUN_TEST(test_offline_timer_resets_when_wifi_returns);
+    RUN_TEST(test_wifi_recovery_paused_while_setup_portal_is_open);
+    RUN_TEST(test_wifi_reconnect_attempts_are_counted_for_diagnostics);
+    RUN_TEST(test_mqtt_restart_command_reason);
+
+    RUN_TEST(test_subscribes_to_home_assistant_status);
+    RUN_TEST(test_home_assistant_online_triggers_rediscovery);
+    RUN_TEST(test_home_assistant_offline_is_ignored);
 
     return UNITY_END();
 }

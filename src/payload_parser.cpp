@@ -28,7 +28,10 @@ constexpr size_t kDiscoveryJsonCapacity = 700;
 #ifndef GATEWAY_FW_VERSION
 #define GATEWAY_FW_VERSION "dev"
 #endif
-constexpr size_t kStatusJsonCapacity = 384;
+// 13 members. Sized for the native (64-bit) test build, where each slot is
+// twice the ESP32's size; ArduinoJson silently drops members that don't fit,
+// which test_build_gateway_status_message catches.
+constexpr size_t kStatusJsonCapacity = 640;
 
 std::string trim(const std::string& s) {
     size_t start = 0;
@@ -615,6 +618,8 @@ MqttMessage buildGatewayStatusMessage(const GatewayIdentity& gateway, const Gate
     doc["onlyknown"] = stats.onlyKnownNodes;
     doc["queue_depth"] = stats.queueDepth;
     doc["packets_dropped"] = stats.packetsDropped;
+    doc["wifi_reconnects"] = stats.wifiReconnects;
+    doc["wifi_disc_reason"] = stats.wifiDisconnectReason;
 
     MqttMessage msg;
     msg.topic = gateway.baseTopic + "/gateway/state";
