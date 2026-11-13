@@ -1051,6 +1051,28 @@ static void test_node_name_during_in_flight_discovery_is_applied_once_batch_comp
     }
 }
 
+// Codex review on PR #32: an id may contain '=', so the persisted
+// "id=name" entry must still map back to the full id after a restart.
+static void test_node_name_survives_restart_for_id_containing_equals(void) {
+    FakeWifiRadio wifi;
+    FakeLoRa loRa;
+    FakeMqtt mqtt;
+    FakeStore store("sensor=1");
+    FakeDisplay display;
+    FakeClock clock;
+
+    gateway::GatewayOrchestrator first(wifi, loRa, mqtt, store, display, clock, "LoRaGateway",
+                                        "lora/incoming");
+    first.begin();
+    TEST_ASSERT_TRUE(first.setNodeName("sensor=1", "Garage"));
+
+    gateway::GatewayOrchestrator restarted(wifi, loRa, mqtt, store, display, clock, "LoRaGateway",
+                                            "lora/incoming");
+    restarted.begin();
+    TEST_ASSERT_EQUAL_STRING("Garage", restarted.nodeName("sensor=1").c_str());
+    TEST_ASSERT_EQUAL_STRING("", restarted.nodeName("sensor").c_str());
+}
+
 static void test_remove_node_forgets_its_name(void) {
     FakeWifiRadio wifi;
     FakeLoRa loRa;
@@ -2088,6 +2110,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_node_name_rejected_for_unapproved_node);
     RUN_TEST(test_node_name_before_first_packet_is_used_by_first_discovery);
     RUN_TEST(test_node_name_during_in_flight_discovery_is_applied_once_batch_completes);
+    RUN_TEST(test_node_name_survives_restart_for_id_containing_equals);
     RUN_TEST(test_remove_node_forgets_its_name);
 
     RUN_TEST(test_offline_packets_are_queued_not_lost);

@@ -52,7 +52,7 @@ std::vector<std::string> buildForwardedSummary(const SensorReading& reading, con
 
 // Serializes/parses swVersionByNode_ for INodeStore::save/loadNodeVersionsCsv(),
 // and nameByNode_ for save/loadNodeNamesCsv() (sanitizeNodeName() strips ','
-// and '=' from names for this reason).
+// and '=' from names for this reason; see parseNodeNames()).
 // "id=version" pairs joined by ',', mirroring AllowList's own CSV format and
 // its same pragmatic assumption that neither a (sanitized) node id nor a git
 // short hash contains '=' or ',' -- this is gateway-internal persistence, not
@@ -86,6 +86,28 @@ std::map<std::string, std::string> parseNodeVersions(const std::string& csv) {
     return out;
 }
 
+// Parses nameByNode_'s "id=name" CSV. Splits each entry at its *last* '=':
+// sanitizeNodeName() never lets a name contain '=', but a node id may
+// (sanitizeMqttTopicSegment() allows it), so splitting at the first '=' would
+// file "sensor=1=Garage" under "sensor" after a restart.
+std::map<std::string, std::string> parseNodeNames(const std::string& csv) {
+    std::map<std::string, std::string> out;
+    size_t start = 0;
+    while (start <= csv.size()) {
+        size_t comma = csv.find(',', start);
+        if (comma == std::string::npos) comma = csv.size();
+        std::string entry = csv.substr(start, comma - start);
+        size_t eq = entry.rfind('=');
+        if (eq != std::string::npos) {
+            std::string id = entry.substr(0, eq);
+            std::string name = entry.substr(eq + 1);
+            if (!id.empty() && !name.empty()) out[id] = name;
+        }
+        start = comma + 1;
+    }
+    return out;
+}
+
 } // namespace
 
 GatewayOrchestrator::GatewayOrchestrator(IWifiRadio& wifi, ILoRaReceiver& loRa, IMqttClient& mqtt,
@@ -109,7 +131,7 @@ GatewayOrchestrator::GatewayOrchestrator(IWifiRadio& wifi, ILoRaReceiver& loRa, 
 void GatewayOrchestrator::begin() {
     allowList_ = AllowList(store_.loadAllowListCsv());
     swVersionByNode_ = parseNodeVersions(store_.loadNodeVersionsCsv());
-    nameByNode_ = parseNodeVersions(store_.loadNodeNamesCsv());
+    nameByNode_ = parseNodeNames(store_.loadNodeNamesCsv());
 }
 
 void GatewayOrchestrator::setIdentity(const std::string& deviceName, const std::string& baseTopic) {
