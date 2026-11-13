@@ -143,6 +143,7 @@ bool GatewayOrchestrator::removeNode(const std::string& id) {
     // rather than inheriting whatever firmware version the old device last
     // reported under this id.
     swVersionByNode_.erase(id);
+    lossByNode_.erase(id);
     store_.saveNodeVersionsCsv(serializeNodeVersions(swVersionByNode_));
 
     // Clear this node's retained last-known reading (Codex review on PR
@@ -510,11 +511,18 @@ void GatewayOrchestrator::ingestOnePacket(const RawPacket& packet) {
         auto seenIt = lastSeenByNode_.find(reading.id);
         if (seenIt == lastSeenByNode_.end()) {
             lastSeenByNode_[reading.id] = LastSeen{reading.bootCount, reading.seq};
+            PacketLossWindow& window = lossByNode_[reading.id];
+            window.reset();
+            window.received(reading.seq);
         } else if (reading.bootCount > seenIt->second.bootCount ||
                    (reading.bootCount == 1 && reading.bootCount != seenIt->second.bootCount)) {
             seenIt->second = LastSeen{reading.bootCount, reading.seq};
+            PacketLossWindow& window = lossByNode_[reading.id];
+            window.reset();
+            window.received(reading.seq);
         } else if (reading.bootCount == seenIt->second.bootCount && reading.seq > seenIt->second.seq) {
             seenIt->second.seq = reading.seq;
+            lossByNode_[reading.id].received(reading.seq);
         } else {
             // Same-or-earlier seq within the same boot (a retransmission),
             // or a bootCount that went backwards without looking like a
@@ -524,12 +532,19 @@ void GatewayOrchestrator::ingestOnePacket(const RawPacket& packet) {
     }
     if (isDuplicate) return;
 
-    MqttMessage stateMsg = buildSensorStateMessage(reading, packet.rssi, route.topic);
+    LinkQuality link;
+    link.rssi = packet.rssi;
+    link.snr = packet.snr;
+    if (reading.hasSeq) {
+        auto lossIt = lossByNode_.find(reading.id);
+        if (lossIt != lossByNode_.end()) link.lossPct = lossIt->second.lossPercent();
+    }
+    MqttMessage stateMsg = buildSensorStateMessage(reading, link, route.topic);
     if (onPacketForwarded_) onPacketForwarded_(stateMsg.topic, stateMsg.payload);
     // Retained, same convention as the gateway's own status message (see
     // main.cpp's publishGatewayStatus()): on a node's first sighting (or any
     // re-discovery after a gateway restart/reflash), this state message is
-    // published immediately after that node's 8 discovery configs, in the
+    // published immediately after that node's 10 discovery configs, in the
     // same synchronous burst. Home Assistant needs to finish processing a
     // discovery config -- creating the entity and subscribing to its state
     // topic -- before it can receive anything published to that topic; a
