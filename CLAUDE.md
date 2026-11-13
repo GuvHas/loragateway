@@ -1,6 +1,7 @@
 # loragateway
 
-ESP32 (TTGO LoRa32 v2.1) firmware that receives JSON sensor readings over LoRa
+ESP32 (TTGO LoRa32 v2.1) firmware that receives sensor readings (binary frame or
+JSON) over LoRa
 and publishes them to MQTT with Home Assistant discovery. The sensor nodes run
 the companion firmware in [GuvHas/loratemp](https://github.com/GuvHas/loratemp).
 
@@ -67,8 +68,10 @@ manual check for the owner.
   before sending, so `boot` is 1 on the first packet after a flash or battery
   swap.
 - `seq` counts transmissions.
-- `sw` is the node's firmware version. The node sends it only until one
-  transmission carrying it succeeds, then leaves it out.
+- `sw` is the node's firmware version. The node sends it until one
+  transmission carrying it succeeds, on its first 3 sends after power-up, and
+  once a day (loratemp `shouldReportVersion()`). Repeats of an unchanged
+  version are no-ops here.
 - A field with the wrong type rejects the whole payload. Unknown fields are
   ignored.
 
@@ -144,8 +147,8 @@ Radio settings must match on both sides: 868 MHz, spreading factor 9, CRC on.
   reset to any change in `boot`: that lets two old packets be replayed in
   turn indefinitely.
 - **`sw` is captured before the pending check and before deduplication,** and
-  persisted under the `swver` Preferences key. A node sends it once, often
-  before it is approved.
+  persisted under the `swver` Preferences key. A node sends it on only a few
+  packets, often before it is approved.
 - **Do not overwrite `pendingDiscoveryCount_` while a batch is queued.** A
   version change during a batch goes into `pendingRediscovery_` and is
   republished when the batch completes.
