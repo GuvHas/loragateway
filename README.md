@@ -116,6 +116,8 @@ Temperature
 <img width="317" height="247" alt="image" src="https://github.com/user-attachments/assets/c99c4131-62ed-4262-bf31-27611e99d715" />
 
 
+Temperature is published to 0.1 °C and humidity in whole percent.
+
 Temperature/Humidity go `unknown` in Home Assistant (rather than showing a
 stale or garbage value) whenever the sensor node reports a failed DHT read.
 
