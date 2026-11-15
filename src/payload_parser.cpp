@@ -563,9 +563,14 @@ MqttMessage buildSensorStateMessage(const SensorReading& reading, const LinkQual
     doc["id"] = reading.id;
     // Published at the precision Home Assistant shows: 0.1 degree and whole
     // percent. Rounded in double so 21.6 serializes as 21.6, not as the
-    // nearest float's 21.60000038.
+    // nearest float's 21.60000038. The float that a JSON "21.55" parses into
+    // is 21.549999..., so the value is nudged away from zero by far less
+    // than any real reading step before rounding, or that midpoint would
+    // round down.
     if (reading.temperatureC.has_value()) {
-        doc["t"] = std::round(static_cast<double>(*reading.temperatureC) * 10.0) / 10.0;
+        double tenths = static_cast<double>(*reading.temperatureC) * 10.0;
+        tenths += std::copysign(1e-3, tenths);
+        doc["t"] = std::round(tenths) / 10.0;
     } else {
         doc["t"] = nullptr;
     }

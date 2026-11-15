@@ -821,6 +821,21 @@ static void test_state_message_rounds_temperature_and_humidity(void) {
     TEST_ASSERT_TRUE(msg.payload.find("\"h\":56,") != std::string::npos);
 }
 
+// JSON parses into a float, so 21.55 arrives as 21.549999... and would round
+// down without the nudge in buildSensorStateMessage().
+static void test_state_message_rounds_decimal_midpoints_up(void) {
+    const char* cases[][2] = {{R"({"id":"k","t":21.55})", "\"t\":21.6,"},
+                              {R"({"id":"k","t":21.65})", "\"t\":21.7,"},
+                              {R"({"id":"k","t":-21.55})", "\"t\":-21.6,"},
+                              {R"({"id":"k","t":21.54})", "\"t\":21.5,"}};
+    for (const auto& c : cases) {
+        ParseResult parsed = parseSensorPayload(std::string(c[0]));
+        TEST_ASSERT_TRUE(parsed.ok());
+        MqttMessage msg = buildSensorStateMessage(parsed.reading, LinkQuality{-80}, "t");
+        TEST_ASSERT_TRUE(msg.payload.find(c[1]) != std::string::npos);
+    }
+}
+
 static void test_state_message_rounds_negative_temperature(void) {
     ParseResult parsed = parseSensorPayload(std::string(R"({"id":"freezer","t":-18.25,"h":0.4})"));
     TEST_ASSERT_TRUE(parsed.ok());
@@ -944,6 +959,7 @@ int main(int argc, char** argv) {
     RUN_TEST(test_state_message_carries_snr_and_loss);
     RUN_TEST(test_state_message_rounds_temperature_and_humidity);
     RUN_TEST(test_state_message_rounds_negative_temperature);
+    RUN_TEST(test_state_message_rounds_decimal_midpoints_up);
     RUN_TEST(test_discovery_sets_temperature_and_humidity_display_precision);
     RUN_TEST(test_state_message_unknown_snr_and_loss_are_null);
     RUN_TEST(test_discovery_includes_snr_sensor);
