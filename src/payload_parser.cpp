@@ -561,8 +561,24 @@ MqttMessage buildSensorStateMessage(const SensorReading& reading, const LinkQual
                                      const std::string& topic) {
     StaticJsonDocument<kSensorJsonCapacity> doc;
     doc["id"] = reading.id;
-    if (reading.temperatureC.has_value()) doc["t"] = *reading.temperatureC; else doc["t"] = nullptr;
-    if (reading.humidityPct.has_value()) doc["h"] = *reading.humidityPct; else doc["h"] = nullptr;
+    // Published at the precision Home Assistant shows: 0.1 degree and whole
+    // percent. Rounded in double so 21.6 serializes as 21.6, not as the
+    // nearest float's 21.60000038. The float that a JSON "21.55" parses into
+    // is 21.549999..., so the value is nudged away from zero by far less
+    // than any real reading step before rounding, or that midpoint would
+    // round down.
+    if (reading.temperatureC.has_value()) {
+        double tenths = static_cast<double>(*reading.temperatureC) * 10.0;
+        tenths += std::copysign(1e-3, tenths);
+        doc["t"] = std::round(tenths) / 10.0;
+    } else {
+        doc["t"] = nullptr;
+    }
+    if (reading.humidityPct.has_value()) {
+        doc["h"] = std::lround(*reading.humidityPct);
+    } else {
+        doc["h"] = nullptr;
+    }
     if (reading.batteryVoltage.has_value()) doc["v"] = *reading.batteryVoltage; else doc["v"] = nullptr;
     doc["boot"] = reading.bootCount;
     doc["seq"] = reading.seq;
@@ -663,10 +679,10 @@ std::vector<MqttMessage> buildAutoDiscoveryMessages(const std::string& nodeId,
                                                      const std::string& displayName) {
     std::vector<MqttMessage> messages;
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "t", "Temperature",
-                                             "{{ value_json.t }}", "°C", "temperature", gateway, "", -1,
+                                             "{{ value_json.t }}", "°C", "temperature", gateway, "", 1,
                                              swVersion, displayName));
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "h", "Humidity",
-                                             "{{ value_json.h }}", "%", "humidity", gateway, "", -1,
+                                             "{{ value_json.h }}", "%", "humidity", gateway, "", 0,
                                              swVersion, displayName));
     messages.push_back(buildEntityDiscovery("sensor", nodeId, "v", "Battery",
                                              "{{ value_json.v }}", "V", "voltage", gateway, "", 2, swVersion, displayName));

@@ -1,6 +1,7 @@
 #include "orchestrator.h"
 
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 
 namespace gateway {
@@ -27,6 +28,12 @@ std::string formatOneDecimal(float value) {
     return std::string(buf);
 }
 
+std::string formatWholeNumber(float value) {
+    // lround, like the MQTT state message, so 44.5 shows as 45 on both
+    // (printf's "%.0f" would round half to even and show 44).
+    return std::to_string(std::lround(value));
+}
+
 // Builds a short, human-readable summary of a forwarded reading for the
 // OLED (3 short lines instead of the raw JSON payload, which either wraps
 // illegibly across the screen or gets truncated to something meaningless --
@@ -35,7 +42,7 @@ std::string formatOneDecimal(float value) {
 std::vector<std::string> buildForwardedSummary(const SensorReading& reading, const std::string& topic) {
     std::string tempStr = reading.temperatureC.has_value() ? formatOneDecimal(*reading.temperatureC) + "C" : "--";
     std::string humidityStr =
-        reading.humidityPct.has_value() ? formatOneDecimal(*reading.humidityPct) + "%" : "--";
+        reading.humidityPct.has_value() ? formatWholeNumber(*reading.humidityPct) + "%" : "--";
     std::string voltageStr =
         reading.batteryVoltage.has_value() ? formatOneDecimal(*reading.batteryVoltage) + "V" : "--";
 

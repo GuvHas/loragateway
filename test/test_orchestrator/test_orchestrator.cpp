@@ -222,7 +222,7 @@ static void test_forwarded_packet_shows_curated_summary_not_raw_json(void) {
 
     TEST_ASSERT_EQUAL_UINT32(3, display.lastLines.size());
     TEST_ASSERT_EQUAL_STRING("Fwd: lora/incoming/kitchen", display.lastLines[0].c_str());
-    TEST_ASSERT_EQUAL_STRING("T: 22.5C H: 45.0%", display.lastLines[1].c_str());
+    TEST_ASSERT_EQUAL_STRING("T: 22.5C H: 45%", display.lastLines[1].c_str());
     TEST_ASSERT_EQUAL_STRING("V: 4.1V", display.lastLines[2].c_str());
     for (const auto& line : display.lastLines) {
         TEST_ASSERT_TRUE(line.find('{') == std::string::npos);

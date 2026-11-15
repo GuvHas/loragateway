@@ -128,6 +128,15 @@ Radio settings must match on both sides: 868 MHz, spreading factor 9, CRC on.
 | `homeassistant/<component>/lora_<slug>_<suffix>/config` | yes | Node discovery, `kNodeDiscoveryEntityCount` (10) entities per node |
 | `homeassistant/<component>/<gateway slug>_<suffix>/config` | yes | Gateway discovery |
 
+### Precision in the node state
+
+`t` is published rounded to 0.1 °C and `h` rounded to a whole percent
+(`buildSensorStateMessage()`), whatever the node sent, and their discovery
+configs set `sugg_dsp_prec` to 1 and 0. The DHT22 is only accurate to about
+±0.5 °C and ±2 to 5 % RH, so further decimals are noise. The binary frame
+still carries `h` in 0.1 % steps; narrowing it would need a new frame version
+to save one byte.
+
 ### Link quality in the node state
 
 - `rssi` and `snr` come from the radio for the packet that produced the
